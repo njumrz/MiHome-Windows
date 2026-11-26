@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """设备详情里的实时视频及其布局。"""
 
-from PySide6.QtCore import QPointF, QRect, QRectF, QSignalBlocker, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QPointF, QRect, QRectF, QSize, QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QComboBox, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
-from app.core.camera_stream import has_second_lens
-from app.ui.camera_playback import CameraPlayback
+from app.core.camera_stream import has_second_lens, stream_name
+from app.ui.camera_playback import CameraPlayback, start_camera_playbacks
 
 
 def draw_frame(painter, area, image, status, zoom=1.0, center=None):
@@ -38,6 +38,10 @@ class CameraCanvas(QWidget):
         self._anchor = None
         self._thumbnail = False
         self.setMinimumHeight(90)
+        self.setToolTip("按住 Ctrl 滚轮缩放，放大后可拖动画面")
+
+    def sizeHint(self):
+        return QSize(320, 180)
 
     def set_frame(self, image):
         self._image = image
@@ -73,7 +77,8 @@ class CameraCanvas(QWidget):
         self.update()
 
     def wheelEvent(self, event):
-        if self._thumbnail or self._image.isNull():
+        if (self._thumbnail or self._image.isNull()
+                or not event.modifiers() & Qt.KeyboardModifier.ControlModifier):
             event.ignore()
             return
         self.set_zoom(self._zoom * 1.25 ** (event.angleDelta().y() / 120))
@@ -115,6 +120,7 @@ class CameraTile(QWidget):
         super().__init__(parent)
         self._device, self._lens, self._service, self._jobs = device, lens, service, jobs
         self.playback = None
+        self._playback_connections = []
         self.canvas = CameraCanvas(self)
         self.canvas.setAccessibleName(f"镜头 {lens} 实时画面")
         self._retry = QPushButton("重试", self)
@@ -127,18 +133,19 @@ class CameraTile(QWidget):
         self.header.setContentsMargins(0, 0, 0, 0)
         self.header.addWidget(QLabel(f"镜头 {lens}", self))
         self._resolution = QLabel(self)
+        self._resolution_before_quality = None
         self.header.addWidget(self._resolution)
         self.header.addStretch()
         self.header.addWidget(self._retry)
         zoom_button = QPushButton("×1.0", self)
         zoom_button.setAccessibleName("恢复画面原始倍率")
+        zoom_button.setToolTip("重置数字缩放。按住 Ctrl 滚轮可放大或缩小画面。")
         zoom_button.clicked.connect(lambda: self.canvas.set_zoom(1.0))
         self.canvas.zoom_changed.connect(lambda zoom: zoom_button.setText(f"×{zoom:.1f}"))
         self.header.addWidget(zoom_button)
         self._quality = QComboBox(self)
         self._quality.setAccessibleName(f"镜头 {lens} 清晰度")
-        for value, label in enumerate(("自动", "标清", "高清")):
-            self._quality.addItem(label, value)
+        self._quality_options = ()
         self._quality.hide()
         self._quality.activated.connect(self._select_quality)
         self.header.addWidget(self._quality)
@@ -151,42 +158,86 @@ class CameraTile(QWidget):
         layout.addWidget(self._header_widget)
         layout.addWidget(self.canvas, stretch=1)
 
-    def start(self):
+    def start(self, *, autoplay=True):
+        from app.ui.camera_pip import existing_pip_playback
+
+        previous = self.playback
         self.stop()
         self._retry.hide()
-        self.playback = CameraPlayback(self._device, self._lens, self._service, self._jobs, self)
-        self.playback.frame_changed.connect(self.canvas.set_frame)
-        self.playback.status_changed.connect(self.canvas.set_status)
-        self.playback.failed.connect(self._show_retry)
-        self.playback.resolution_changed.connect(self._update_resolution)
-        self.playback.quality_changed.connect(self._quality_result)
-        self.playback.audio_failed.connect(self.audio_failed)
-        self.playback.talk_changed.connect(self.talk_changed)
+        self._resolution_before_quality = None
+        self._quality.setToolTip("")
+        playback = existing_pip_playback(stream_name(self._device.did, self._lens))
+        if playback is None:
+            playback = CameraPlayback(self._device, self._lens, self._service, self._jobs, self)
+        self.playback = playback
+        playback.retain(self)
+        self._playback_connections = [
+            playback.frame_changed.connect(self.canvas.set_frame),
+            playback.status_changed.connect(self.canvas.set_status),
+            playback.failed.connect(self._show_retry),
+            playback.resolution_changed.connect(self._update_resolution),
+            playback.quality_changed.connect(self._quality_result),
+            playback.audio_failed.connect(self.audio_failed),
+            playback.talk_changed.connect(self.talk_changed),
+        ]
+        self.canvas.set_frame(QImage())
+        self._update_resolution(playback.resolution)
         self.session_changed.emit()
-        self.playback.start()
+        if autoplay and not playback.is_active:
+            if previous is None or not playback.resume_shared_feed(previous):
+                playback.start()
+        return playback
 
     def stop(self):
         if self.playback is not None:
-            self.playback.stop()
-            self.playback.deleteLater()
+            for connection in self._playback_connections:
+                QObject.disconnect(connection)
+            self._playback_connections.clear()
+            self.playback.release(self)
             self.playback = None
 
     def _show_retry(self, _message):
         self._retry.show()
 
     def _select_quality(self, index):
-        if self.playback is not None and not self.playback.set_quality(self._quality.itemData(index)):
+        if self.playback is None:
+            return
+        requested = self._quality.itemData(index)
+        if requested == self.playback.quality:
+            return
+        previous = self._resolution.text()
+        if self.playback.set_quality(requested):
+            self._resolution_before_quality = previous
+        else:
             self._quality_result(self.playback.quality, False)
 
     def _quality_result(self, value, accepted):
         with QSignalBlocker(self._quality):
             self._quality.setCurrentIndex(self._quality.findData(value))
-        self._quality.setToolTip("" if accepted else "该清晰度未应用，已恢复原档位")
+        if accepted:
+            self._quality.setToolTip("已发送档位请求，实际分辨率以解码画面为准。")
+        else:
+            self._resolution_before_quality = None
+            self._quality.setToolTip("该清晰度未应用，已恢复原档位")
 
     def _update_resolution(self, size):
         available = size.width() > 0 and size.height() > 0
-        self._resolution.setText(f"{size.width()}×{size.height()}" if available else "")
+        resolution = f"{size.width()}×{size.height()}" if available else ""
+        self._resolution.setText(resolution)
+        if available and self._resolution_before_quality is not None:
+            if resolution == self._resolution_before_quality:
+                self._quality.setToolTip(f"档位已请求，摄像头当前仍输出 {resolution}。")
+            else:
+                self._quality.setToolTip(f"摄像头当前输出 {resolution}。")
+                self._resolution_before_quality = None
         quality = self.playback.quality if self.playback is not None else None
+        options = self.playback.quality_options if quality is not None else ()
+        if options != self._quality_options:
+            self._quality_options = options
+            with QSignalBlocker(self._quality):
+                self._quality.clear()
+                for value, label in options:
+                    self._quality.addItem(label, value)
         self._quality.setVisible(quality is not None)
         self._quality.setEnabled(available)
         if available and quality is not None:
@@ -225,20 +276,14 @@ class CameraView(QWidget):
         self._grid.setSpacing(8)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        title = QLabel(self)
-        title.setTextFormat(Qt.TextFormat.PlainText)
-        title.setText(device.name)
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        outer.addWidget(title)
         self._speed = QLabel("— KB/s", self)
-        self._speed.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._speed.setAccessibleName("视频接收速率")
-        outer.addWidget(self._speed)
         self._speaker = QPushButton("声音", self)
         self._speaker.setCheckable(True)
         self._speaker.setAccessibleName("播放现场声音")
         self._speaker.toggled.connect(self._sync_audio)
         controls = QHBoxLayout()
+        controls.addWidget(self._speed)
         controls.addStretch()
         controls.addWidget(self._speaker)
         self._talk = QPushButton("通话", self)
@@ -263,8 +308,7 @@ class CameraView(QWidget):
     def start(self):
         if not self._open:
             self._open = True
-            for tile in self.tiles:
-                tile.start()
+            start_camera_playbacks([tile.start(autoplay=False) for tile in self.tiles])
             self._rate_timer.start()
 
     def stop(self):

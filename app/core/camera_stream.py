@@ -8,6 +8,7 @@ import os
 import socket
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from http.client import HTTPConnection, HTTPException
 from pathlib import Path
 from urllib.parse import quote, urlencode
@@ -16,7 +17,12 @@ _HOST = "127.0.0.1"
 _API_PORT = 1984
 _RTSP_PORT = 8554
 _CAMERA_TOKENS = (".camera.", ".cateye.", ".feeder.")
-_DUAL_CAMERA_MODELS = {"xiaomi.camera.082ac1", "isa.camera.cw501d"}
+DEFAULT_RELAY_QUALITIES = ((0, "自动"), (1, "标清"), (2, "高清"))
+# The MISS channel index for these dual cameras is 0 for pan/tilt and 10 for fixed.
+_DUAL_CAMERA_QUALITIES = {
+    "xiaomi.camera.082ac1": ((0, "自动"), (1, "480P"), (3, "3K")),
+    "isa.camera.cw501d": ((0, "自动"), (1, "流畅"), (3, "高清")),
+}
 
 
 def is_camera(model: str) -> bool:
@@ -25,7 +31,11 @@ def is_camera(model: str) -> bool:
 
 
 def has_second_lens(model: str) -> bool:
-    return (model or "").lower() in _DUAL_CAMERA_MODELS
+    return (model or "").lower() in _DUAL_CAMERA_QUALITIES
+
+
+def relay_quality_options(model: str) -> tuple[tuple[int, str], ...]:
+    return _DUAL_CAMERA_QUALITIES.get((model or "").lower(), DEFAULT_RELAY_QUALITIES)
 
 
 def stream_name(did: str, lens: int) -> str:
@@ -42,8 +52,19 @@ def rtsp_url(stream_name: str) -> str:
 
 def probe_local_video(stream_name: str) -> bool:
     """通过 go2rtc 请求一路关键帧，确认局域网取流可用。须在后台调用。"""
+    return ensure_service() and _probe_local_frame(stream_name)
+
+
+def probe_local_pair(first: str, second: str) -> tuple[bool, bool]:
     if not ensure_service():
-        return False
+        return False, False
+    with ThreadPoolExecutor(max_workers=2) as probes:
+        first_result = probes.submit(_probe_local_frame, first)
+        second_result = probes.submit(_probe_local_frame, second)
+        return first_result.result(), second_result.result()
+
+
+def _probe_local_frame(stream_name: str) -> bool:
     connection = HTTPConnection(_HOST, _API_PORT, timeout=3.0)
     try:
         connection.request("GET", f"/api/frame.mp4?{urlencode({'src': stream_name})}")

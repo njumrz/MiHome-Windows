@@ -153,9 +153,11 @@ python -m venv .venv
 
 可将 `go2rtc.exe` 和 `go2rtc.yaml` 放在 `%LOCALAPPDATA%\MiHome-Camera`，或启动前设置 `MIHOME_CAMERA_DIR` 指向配置目录。打开摄像机详情页并选择「网页播放」或「悬浮窗」，客户端会按需启动 go2rtc。
 
-本地试用公网中继时，可将 `MIHOME_CAMERA_RELAY_DIR` 指向 [MijiaDeck 便携包](https://github.com/Songmanual/MijiaDeck/releases)中包含 `camera-relay.jar` 与 `runtime\bin\java.exe` 的目录，再启动客户端。配置生效后，「悬浮窗」会先探测所选镜头的局域网视频，取不到画面时自动切到公网中继。握手首次等待 15 秒，失败时会重新申请授权并用新的连接重试一次，第二次最多等待 30 秒。中继接通后如果没有画面，会换一档画质重试一次。悬浮窗显示连接失败后，再点一次「悬浮窗」可以重新连接。
+本地试用公网预览时，可将 `MIHOME_CAMERA_RELAY_DIR` 指向包含 `camera-relay.jar` 与 `runtime\bin\java.exe` 的目录，再启动客户端。组件来自 [MijiaDeck 便携包](https://github.com/Songmanual/MijiaDeck/releases)。客户端先探测所选镜头的局域网视频，取不到画面时自动尝试公网连接。v7 组件首次握手给 15 秒。如果中继已应答，允许组件继续完成端口分配和摄像机入会。确认一整轮有候选节点且没有握手应答后，会提前重新申请授权并换一条连接。重试最多给握手 48 秒。接通后一直没有画面时，会换一档画质重试一次。
 
-可在中继目录中生成 `camera-relay-dual-lens-v6.jar`，用于切换镜头、显示握手进度和视频接收速率、调整清晰度及播放现场声音。实际分辨率取决于摄像机返回的码流。设备详情默认静音，点击「声音」开启主画面的音频。「通话」开启麦克风，挂断、断线、切换主镜头或离开页面时关闭麦克风。公网播放时，在详情页选择另一个镜头并点击「悬浮窗」，会复用当前公网会话来切换画面。需要同时观看时，在「悬浮窗」按钮上右键选择「另开悬浮窗」。使用 Windows JDK 21 和 [MijiaDeck v1.1.2 的 CameraRelay.java](https://github.com/Songmanual/MijiaDeck/blob/v1.1.2/tools/camera_relay/CameraRelay.java) 运行以下命令。
+设备详情、画中画及悬浮窗共用对应镜头的播放会话。在详情页选择镜头后点击「悬浮窗」可切换现有悬浮窗。要同时打开两个悬浮窗，可右键选择「另开悬浮窗」。设备详情默认静音，点击「声音」可听现场声音。开启「通话」后，挂断、断线、切换主镜头或离开页面时会关闭麦克风。实际分辨率取决于摄像机返回的码流。
+
+v10 组件让公网中继和 P2P 协商错开 750 毫秒启动。默认先试中继，最近在当前登录会话中成功出画的路径优先。先接通的路径继续做设备认证，另一条随即关闭。中继连续三轮找不到候选后会结束当前尝试，两条路径都失败才重新授权。双镜头都需要公网时，设备详情用一条会话同时请求两路视频。每个镜头收到自己的关键帧后独立出画。`debug.log` 的 `route_selected` 和 `公网视频首帧` 标记实际走的是 `p2p` 还是 `relay`，两个公网镜头共用同一个 `session`。支持的双摄按型号提供清晰度，实际分辨率以解码画面为准。使用 Windows JDK 21 和 MijiaDeck v1.1.2 的 `CameraRelay.java` 生成 `camera-relay-dual-lens-v10.jar`。 [MijiaDeck 组件源码](https://github.com/Songmanual/MijiaDeck/blob/v1.1.2/tools/camera_relay/CameraRelay.java)
 
 ```powershell
 python -m tools.build_camera_relay_second_lens --jdk 'C:\path\to\jdk-21' --source 'C:\path\to\CameraRelay.java' --relay-dir $env:MIHOME_CAMERA_RELAY_DIR

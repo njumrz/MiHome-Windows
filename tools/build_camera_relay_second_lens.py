@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from zipfile import ZIP_DEFLATED, ZipFile
 
 _CLASS_NAME = "CameraRelayDualLens"
-_JAR_NAME = "camera-relay-dual-lens-v6.jar"
+_JAR_NAME = "camera-relay-dual-lens-v10.jar"
 _CHECK = "CAMERA_RELAY_DUAL_LENS"
 
 
@@ -30,9 +30,12 @@ def build(jdk: Path, source: Path, relay_dir: Path) -> Path:
         "import java.nio.charset.StandardCharsets;": '''import java.nio.charset.StandardCharsets;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.List;
 import micam.pppp.Frame;
 import micam.pppp.Msg;''',
         "    private static int videoCodec;": r'''    private static int videoCodec;
+    private static volatile CameraPublicSession publicSession;
+    private static volatile CameraPairedMedia pairedMedia;
     private static volatile int lens = 1;
     private static volatile String[] nextStream;
     private static String relayStage;
@@ -153,12 +156,54 @@ import micam.pppp.Msg;''',
         }
     }
 
+    private static int relayRound = 1;
+    private static int emptyRelayRounds;
+    private static long relayRoundStart = System.nanoTime();
+    private static int candidates, listRequests, listReplies, relayOffers, helloRequests, helloReplies, portReplies, peerReplies;
+
+    private static void reportRelayRound() {
+        long millis = Duration.ofNanos(System.nanoTime() - relayRoundStart).toMillis();
+        report("RELAY ROUND %d %d %d %d %d %d %d %d %d %d".formatted(
+                relayRound, millis, candidates, listRequests, listReplies, relayOffers,
+                helloRequests, helloReplies, portReplies, peerReplies));
+    }
+
     private static void relayProgress(String message) {
         String stage;
-        // The upstream trace contains credentials. Emit only these fixed stage names.
-        if (message.startsWith("uid ") || message.startsWith("retrying discovery")) stage = "DISCOVERY";
-        else if (message.startsWith("  candidate ")) stage = "REGISTER";
-        else if (message.startsWith("relay selected ")) stage = "PORT";
+        // The upstream trace contains addresses and credentials. Only emit counters and fixed stage names.
+        if (message.startsWith("  <- ")) {
+            switch (message.substring(message.lastIndexOf(' ') + 1)) {
+                case "LIST_REQ_ACK" -> listReplies++;
+                case "RLY_TO" -> relayOffers++;
+                case "RLY_HELLO_ACK" -> helloReplies++;
+                case "RLY_PORT_ACK" -> portReplies++;
+                case "RLY_RDY" -> peerReplies++;
+            }
+            return;
+        }
+        if (message.startsWith("  -> ")) {
+            if (message.endsWith(" LIST_REQ1")) listRequests++;
+            if (message.endsWith(" RLY_HELLO")) helloRequests++;
+            return;
+        }
+        if (message.startsWith("uid ")) {
+            relayRoundStart = System.nanoTime();
+            stage = "DISCOVERY";
+        } else if (message.startsWith("retrying discovery")) {
+            emptyRelayRounds = candidates == 0 && relayOffers == 0 ? emptyRelayRounds + 1 : 0;
+            if (emptyRelayRounds >= 3) {
+                // Give the other transport a chance and let the caller retry with a fresh grant.
+                throw new IllegalStateException("No relay candidates in three discovery rounds");
+            }
+            reportRelayRound();
+            relayRound++;
+            candidates = listRequests = listReplies = relayOffers = helloRequests = helloReplies = portReplies = peerReplies = 0;
+            relayRoundStart = System.nanoTime();
+            stage = "DISCOVERY";
+        } else if (message.startsWith("  candidate ")) {
+            candidates++;
+            stage = "REGISTER";
+        } else if (message.startsWith("relay selected ")) stage = "PORT";
         else if (message.startsWith("relay session ")) stage = "CAMERA";
         else return;
         if (!stage.equals(relayStage)) {
@@ -168,10 +213,41 @@ import micam.pppp.Msg;''',
     }
 
     private static void startLens() {
-        if (lens == 1) camera.startVideo(quality, audio);
+        if (pairedMedia != null) pairedMedia.requestVideo();
+        else if (lens == 1) camera.startVideo(quality, audio);
         else camera.sendEncrypted(MissClient.CMD_VIDEO_START,
                 "{\"videoquality\":-1,\"videoquality2\":%d,\"enableaudio\":%d}"
                 .formatted(quality, audio ? 1 : 0));
+    }
+
+    private static void receiveAudio(MediaPacket packet) {
+        if (packet == null || !audio) return;
+        if (packet.codecId() == 1027 || packet.codecId() == 1026) {
+            int rate = ((packet.flags() >>> 3) & 15) == 0 ? 8000 : 16000;
+            report("AUDIO " + rate + " " + Base64.getEncoder().encodeToString(pcm(packet)));
+        } else if (packet.codecId() == 1032) {
+            report("AUDIO OPUS " + Base64.getEncoder().encodeToString(packet.payload()));
+        }
+    }
+
+    private static void playPaired() throws Exception {
+        while (!stopped.get()) {
+            String[] requested = nextStream;
+            if (requested != null) {
+                nextStream = null;
+                pairedMedia.changeQuality(Integer.parseInt(requested[1]), Integer.parseInt(requested[2]),
+                        new CameraPairedMedia.Endpoint(Integer.parseInt(requested[3]), requested[4]));
+            }
+            MediaPacket packet = camera.nextMedia(Duration.ofMillis(500));
+            updateTalk(packet);
+            if (packet != null && packet.isVideo()) pairedMedia.publish(packet);
+            else receiveAudio(packet);
+            String failure = pairedMedia.timeout();
+            if (failure != null) {
+                report(failure);
+                return;
+            }
+        }
     }
 
     private static MediaPacket nextKeyframe() {
@@ -219,33 +295,83 @@ import micam.pppp.Msg;''',
     }
 ''',
         '        String phase = "CONFIG";': '''        String phase = "CONFIG";
-        if (args.length == 1 && args[0].equals("2")) lens = 2;''',
+        if (args.length >= 1 && args[0].equals("2")) lens = 2;
+        boolean relayOnly = List.of(args).contains("--relay-only");
+        boolean preferDirect = List.of(args).contains("--prefer-p2p");
+        boolean paired = List.of(args).contains("--paired");
+        boolean channelIndex = List.of(args).contains("--channel-index");''',
+        '            quality = Integer.parseInt(field(input));': '''            quality = Integer.parseInt(field(input));
+            CameraPairedMedia.Endpoint secondEndpoint = paired
+                    ? new CameraPairedMedia.Endpoint(Integer.parseInt(field(input)), field(input)) : null;
+            int secondQuality = paired ? Integer.parseInt(field(input)) : 1;
+            if (secondQuality < 0 || secondQuality > 3) throw new IllegalArgumentException();''',
+        '            if (quality < 0 || quality > 2) throw new IllegalArgumentException();':
+            '            if (quality < 0 || quality > 3) throw new IllegalArgumentException();',
         f'            report("{_CHECK}");': f'            checkTalkFrame();\n            report("{_CHECK}");',
-        'new RelaySession(Uid.parse(uid), InitString.servers(init), null)':
-            'new RelaySession(Uid.parse(uid), InitString.servers(init), CameraRelayDualLens::relayProgress)',
+        '''            phase = "RELAY";
+            report("PHASE RELAY");
+            relay = new RelaySession(Uid.parse(uid), InitString.servers(init), null);
+            RelaySession.Established session = relay.connect(Duration.ofSeconds(45));
+            if (stopped.get()) return;
+            phase = "AUTH";
+            report("PHASE AUTH");
+            connection = new PpppConnection(relay.socket(), session.relay(), null);''': '''            Uid peerId = Uid.parse(uid);
+            List<String> discovery = InitString.servers(init);
+            phase = "RELAY";
+            report("PHASE PUBLIC");
+            publicSession = new CameraPublicSession(peerId, discovery);
+            CameraPublicSession.Peer peer = publicSession.connect(relayOnly, preferDirect, stopped::get,
+                    CameraRelayDualLens::report, CameraRelayDualLens::relayProgress, CameraRelayDualLens::reportRelayRound);
+            if (stopped.get()) return;
+            report(peer.direct() ? "ROUTE SELECT P2P" : "ROUTE SELECT RELAY");
+            connection = new PpppConnection(peer.socket(), peer.address(), null);
+            phase = "AUTH";
+            report("PHASE AUTH");''',
         '            camera.useSessionKey(MissCrypto.sessionKey(clientPrivate, devicePublic));':
             '            mediaKey = MissCrypto.sessionKey(clientPrivate, devicePublic);\n            camera.useSessionKey(mediaKey);',
+        '''            startLens();
+            phase = "MEDIA";''': '''            if (paired) {
+                phase = "MEDIA";
+                report("PHASE MEDIA");
+                pairedMedia = new CameraPairedMedia(camera, quality, secondQuality, channelIndex,
+                        () -> audio, CameraRelayDualLens::report);
+                pairedMedia.start(new CameraPairedMedia.Endpoint(port, path), secondEndpoint);
+                phase = "STREAM";
+                playPaired();
+                return;
+            }
+            startLens();
+            phase = "MEDIA";''',
         '        try { if (camera != null) camera.stopVideo(); } catch (Exception ignored) { }':
             '        try { stopTalk(); } catch (Exception ignored) { }\n'
             '        try { if (camera != null) camera.stopVideo(); } catch (Exception ignored) { }',
+        '    private static volatile RelaySession relay;\n': '',
+        'import micam.pppp.RelaySession;\n': '',
+        '        try { if (relay != null) relay.close(); } catch (Exception ignored) { }':
+            '        if (publicSession != null) publicSession.close();',
+        '        try { if (server != null) server.close(); } catch (Exception ignored) { }':
+            '        try { if (server != null) server.close(); } catch (Exception ignored) { }\n'
+            '        if (pairedMedia != null) pairedMedia.close();',
         '                    server.publish(packet);':
             '                    server.publish(packet);\n                    reportVideoBytes(packet);',
-        '''                    report("AUDIO 8000 " + Base64.getEncoder().encodeToString(pcm(packet)));
+        '''                } else if (packet != null && audio && (packet.codecId() == 1027 || packet.codecId() == 1026)) {
+                    report("AUDIO 8000 " + Base64.getEncoder().encodeToString(pcm(packet)));
                 } else if (packet != null && audio && packet.codecId() == 1032) {
                     report("NOTICE AUDIO_UNSUPPORTED");
-                    audio = false;''': '''                    int rate = ((packet.flags() >>> 3) & 15) == 0 ? 8000 : 16000;
-                    report("AUDIO " + rate + " " + Base64.getEncoder().encodeToString(pcm(packet)));
-                } else if (packet != null && audio && packet.codecId() == 1032) {
-                    report("AUDIO OPUS " + Base64.getEncoder().encodeToString(packet.payload()));''',
+                    audio = false;''': '''                } else if (packet != null && audio && (packet.codecId() == 1027 || packet.codecId() == 1026
+                        || packet.codecId() == 1032)) {
+                    receiveAudio(packet);''',
         '                            if (command.matches("QUALITY [012]")) {': r'''                            if (command.equals("TALK START")) {
                                 startTalk();
                             } else if (command.equals("TALK STOP")) {
                                 stopTalk();
                             } else if (command.startsWith("TALK DATA ")) {
                                 sendTalkAudio(command.substring(10));
-                            } else if (command.matches("(?:SWITCH [12]|QUALITY [012]) [0-9]{1,5} /camera-[a-f0-9]{32}\\.ts")) {
+                            } else if (paired && command.matches("FEED [12] [0-3] [0-9]{1,5} /camera-[a-f0-9]{32}\\.ts")) {
                                 nextStream = command.split(" ");
-                            } else if (command.matches("QUALITY [012]")) {''',
+                            } else if (command.matches("(?:SWITCH [12]|QUALITY [0-3]) [0-9]{1,5} /camera-[a-f0-9]{32}\\.ts")) {
+                                nextStream = command.split(" ");
+                            } else if (command.matches("QUALITY [0-3]")) {''',
         '''            long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
             MediaPacket first = null;
             while (!stopped.get() && System.nanoTime() < deadline) {
@@ -284,6 +410,9 @@ import micam.pppp.Msg;''',
         subprocess.run([
             str(jdk.resolve() / "bin/javac.exe"), "--release", "21", "-encoding", "UTF-8",
             "-cp", str(upstream), "-d", str(temp), str(java_file),
+            str(Path(__file__).with_name("CameraDirectSession.java")),
+            str(Path(__file__).with_name("CameraPublicSession.java")),
+            str(Path(__file__).with_name("CameraPairedMedia.java")),
         ], check=True)
 
         candidate = temp / _JAR_NAME

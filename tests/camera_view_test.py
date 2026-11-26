@@ -16,6 +16,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from app.core.models import DeviceInfo
+from app.core.camera_stream import DEFAULT_RELAY_QUALITIES
 from app.ui.camera_view import CameraView
 from app.ui.device_dialog import DeviceDetailDialog
 
@@ -29,14 +30,21 @@ class FakePlayback(QObject):
     audio_failed = Signal(str)
     talk_changed = Signal(bool, str)
 
-    def __init__(self, _device, lens, _service, _jobs, parent=None):
+    def __init__(self, device, lens, _service, _jobs, parent=None):
         super().__init__(parent)
+        self.device = device
         self.lens = lens
         self.start = Mock()
         self.stop = Mock()
+        self.retain = Mock()
+        self.release = Mock(side_effect=lambda _owner: self.stop())
+        self.resolution = QSize()
+        self.is_active = False
+        self.resume_shared_feed = Mock(return_value=False)
         self.sample_receive_rate = Mock()
         self.receive_rate = Mock(return_value=None)
         self.quality = None
+        self.quality_options = DEFAULT_RELAY_QUALITIES
         self.set_quality = Mock(return_value=True)
         self.set_muted = Mock()
         self.can_talk = False
@@ -109,6 +117,7 @@ class CameraViewTest(unittest.TestCase):
         first._expand.click()
         self.assertTrue(view.expanded)
         self.assertEqual(dialog._panel.geometry(), dialog.rect())
+        self.assertIs(view.parentWidget(), dialog._panel)
         self.assertTrue(second.canvas._thumbnail)
         second.canvas.clicked.emit()
         self.assertIs(view._primary, second)
@@ -121,11 +130,32 @@ class CameraViewTest(unittest.TestCase):
         self.assertEqual(second.canvas._center, QPointF(0.5, 0.5))
         QTest.keyClick(dialog, Qt.Key.Key_Escape)
         self.assertFalse(view.expanded)
+        self.assertIs(view.parentWidget(), dialog.panel._body.widget())
         self.assertEqual([tile.playback for tile in view.tiles], active)
         for playback in active:
             playback.start.assert_called_once()
             playback.stop.assert_not_called()
         view.stop()
+        dialog.deleteLater()
+
+    def test_device_header_stays_above_preview_in_a_short_details_page(self):
+        with patch("app.ui.camera_view.has_second_lens", return_value=True):
+            dialog = DeviceDetailDialog(Mock(), Mock(), self.device)
+        dialog.show()
+        dialog.resize(640, 340)
+        dialog.load()
+        self.app.processEvents()
+        panel = dialog.panel
+        viewport = panel._body.viewport()
+        view = dialog._camera_view
+        self.assertLess(panel._title_label.mapTo(panel, panel._title_label.rect().topLeft()).y(), viewport.mapTo(panel, viewport.rect().topLeft()).y())
+        self.assertIs(view.parentWidget(), panel._body.widget())
+        self.assertEqual(panel._preview_layout.indexOf(view), 0)
+        self.assertGreater(panel._body.verticalScrollBar().maximum(), 0)
+        panel._set_cards_visible(False)
+        self.assertTrue(view.isVisible())
+        dialog.finished.emit(0)
+        dialog.close()
         dialog.deleteLater()
 
     def test_receive_rate_adds_available_feeds(self):
@@ -151,6 +181,11 @@ class CameraViewTest(unittest.TestCase):
         second._quality.activated.emit(second._quality.findData(2))
         second.playback.set_quality.assert_called_once_with(2)
         first.playback.set_quality.assert_not_called()
+        second.playback.quality_changed.emit(2, True)
+        second.playback.resolution_changed.emit(QSize(848, 480))
+        self.assertIn("仍输出 848×480", second._quality.toolTip())
+        second.playback.resolution_changed.emit(QSize(1920, 1080))
+        self.assertEqual(second._resolution.text(), "1920×1080")
         second.playback.quality_changed.emit(1, False)
         self.assertEqual(second._quality.currentData(), 1)
 

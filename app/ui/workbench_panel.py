@@ -282,8 +282,32 @@ class WorkbenchPanel(QWidget):
 
         self._body = body
         self._container = container
+        self._preview_layout: QVBoxLayout | None = None
         self.setAcceptDrops(True)
         container.setAcceptDrops(True)
+
+    def mount_preview(self, preview: QWidget) -> None:
+        """将预览放到设备标题下方，与设备模块共用一个滚动区。"""
+        if self._preview_layout is None:
+            content = QWidget()
+            layout = QVBoxLayout(content)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(12)
+            self._body.takeWidget()
+            self._load_name.hide()
+            self._load_room.hide()
+            for widget in (self._loading, self._container, self._empty):
+                self.layout().removeWidget(widget)
+                layout.addWidget(widget)
+            layout.addStretch(1)
+            self._body.setWidget(content)
+            self._body.show()
+            self._preview_layout = layout
+        self._preview_layout.insertWidget(0, preview)
+        preview.show()
+
+    def _set_cards_visible(self, visible: bool) -> None:
+        (self._body if self._preview_layout is None else self._container).setVisible(visible)
 
     # ---------- 加载 ----------
 
@@ -299,8 +323,8 @@ class WorkbenchPanel(QWidget):
         self._device = device
         self._title_label.setText(name)
         self._model_label.setText(room)
-        self._title_label.hide()
-        self._model_label.hide()
+        self._title_label.setVisible(self._preview_layout is not None)
+        self._model_label.setVisible(self._preview_layout is not None)
         self._custom_badge.hide()
         self._rename_btn.hide()
         self._load_name.setText(name)
@@ -619,11 +643,11 @@ class WorkbenchPanel(QWidget):
                 if no_funcs else "点击下方按钮添加控制功能")
             self._empty_add_btn.setVisible(not no_funcs)
             self._empty.show()
-            self._body.hide()
+            self._set_cards_visible(False)
             self._footer_add_btn.hide()
             return
         self._empty.hide()
-        self._body.show()
+        self._set_cards_visible(True)
         self._footer_add_btn.setVisible(self._mode == "manage")
         self._left_h = 0
         self._right_h = 0
@@ -657,7 +681,7 @@ class WorkbenchPanel(QWidget):
         self._clear_grid()
         self._empty.hide()
         self._footer_add_btn.hide()
-        self._body.hide()
+        self._set_cards_visible(False)
         self._refresh_btn.hide()
         self._metrics_btn.hide()
         self._rename_btn.hide()
