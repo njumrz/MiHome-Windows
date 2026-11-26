@@ -5,7 +5,7 @@ from functools import partial
 from time import monotonic
 
 import shiboken6
-from PySide6.QtCore import QObject, QTimer, QUrl, Signal
+from PySide6.QtCore import QObject, QSize, QTimer, QUrl, Signal
 from PySide6.QtGui import QImage
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 
@@ -23,6 +23,8 @@ class CameraPlayback(QObject):
     frame_changed = Signal(QImage)
     status_changed = Signal(str)
     failed = Signal(str)
+    resolution_changed = Signal(QSize)
+    quality_changed = Signal(int, bool)
 
     def __init__(self, device: DeviceInfo, lens: int, service: MijiaService,
                  jobs: JobExecutor, parent: QObject | None = None):
@@ -37,6 +39,7 @@ class CameraPlayback(QObject):
         self._url = QUrl()
         self._retries = 0
         self._has_frame = False
+        self._resolution = QSize()
         self._recv_rate = ReceiveRate()
         self._rate_polling = False
 
@@ -85,6 +88,7 @@ class CameraPlayback(QObject):
         self._relay.failed.connect(self._fail)
         self._relay.retry.connect(self._authorize)
         self._relay.received_bytes.connect(self._record_received)
+        self._relay.quality_changed.connect(self.quality_changed)
         self._authorize()
 
     def _authorize(self) -> None:
@@ -114,6 +118,9 @@ class CameraPlayback(QObject):
             self._retry_timer.stop()
             self._retries = 0
             self._has_frame = True
+            if image.size() != self._resolution:
+                self._resolution = image.size()
+                self.resolution_changed.emit(self._resolution)
             self.frame_changed.emit(image)
 
     def _on_status(self, status) -> None:
@@ -152,6 +159,19 @@ class CameraPlayback(QObject):
     def set_muted(self, muted: bool) -> None:
         self._audio.setMuted(muted)
 
+    @property
+    def quality(self) -> int | None:
+        relay = self._relay
+        return relay.quality if relay is not None and shiboken6.isValid(relay) and relay.supports_quality else None
+
+    def set_quality(self, quality: int) -> bool:
+        if not self._has_frame or self.quality is None or not self._relay.set_quality(quality):
+            return False
+        self._stop_player()
+        self._retries = 0
+        self.status_changed.emit("正在切换清晰度…")
+        return True
+
     def receive_rate(self) -> float | None:
         return self._recv_rate.current(monotonic())
 
@@ -171,6 +191,8 @@ class CameraPlayback(QObject):
     def _stop_player(self) -> None:
         self._url = QUrl()
         self._has_frame = False
+        self._resolution = QSize()
+        self.resolution_changed.emit(self._resolution)
         self._retry_timer.stop()
         self._player.stop()
         self._player.setSource(QUrl())

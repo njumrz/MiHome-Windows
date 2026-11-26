@@ -10,7 +10,7 @@ from tests._isolate import isolate
 isolate()
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, QPointF, Qt, Signal
+from PySide6.QtCore import QObject, QPointF, QSize, Qt, Signal
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -24,6 +24,8 @@ class FakePlayback(QObject):
     frame_changed = Signal(QImage)
     status_changed = Signal(str)
     failed = Signal(str)
+    resolution_changed = Signal(QSize)
+    quality_changed = Signal(int, bool)
 
     def __init__(self, _device, lens, _service, _jobs, parent=None):
         super().__init__(parent)
@@ -32,6 +34,8 @@ class FakePlayback(QObject):
         self.stop = Mock()
         self.sample_receive_rate = Mock()
         self.receive_rate = Mock(return_value=None)
+        self.quality = None
+        self.set_quality = Mock(return_value=True)
 
 
 class CameraViewTest(unittest.TestCase):
@@ -129,6 +133,20 @@ class CameraViewTest(unittest.TestCase):
         self.assertEqual(view._speed.text(), "4.0 KB/s")
         view.stop()
         self.assertEqual(view._speed.text(), "— KB/s")
+
+    def test_quality_selection_and_actual_resolution_are_per_lens(self):
+        view = self.make_view(dual=True)
+        view.start()
+        first, second = view.tiles
+        second.playback.quality = 1
+        second.playback.resolution_changed.emit(QSize(848, 480))
+        self.assertEqual(second._resolution.text(), "848×480")
+        self.assertEqual(second._quality.currentData(), 1)
+        second._quality.activated.emit(second._quality.findData(2))
+        second.playback.set_quality.assert_called_once_with(2)
+        first.playback.set_quality.assert_not_called()
+        second.playback.quality_changed.emit(1, False)
+        self.assertEqual(second._quality.currentData(), 1)
 
 
 if __name__ == "__main__":

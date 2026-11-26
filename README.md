@@ -155,7 +155,7 @@ python -m venv .venv
 
 本地试用公网中继时，可将 `MIHOME_CAMERA_RELAY_DIR` 指向 [MijiaDeck 便携包](https://github.com/Songmanual/MijiaDeck/releases)中包含 `camera-relay.jar` 与 `runtime\bin\java.exe` 的目录，再启动客户端。配置生效后，「悬浮窗」会先探测所选镜头的局域网视频，取不到画面时自动切到公网中继。握手首次等待 15 秒，失败时会重新申请授权并用新的连接重试一次，第二次最多等待 30 秒。中继接通后如果没有画面，会换一档画质重试一次。悬浮窗显示连接失败后，再点一次「悬浮窗」可以重新连接。
 
-可在中继目录中生成 `camera-relay-dual-lens-v3.jar`，用于切换镜头、显示握手进度和视频接收速率。公网播放时，在详情页选择另一个镜头并点击「悬浮窗」，会复用当前公网会话来切换画面。需要同时观看时，在「悬浮窗」按钮上右键选择「另开悬浮窗」。使用 Windows JDK 21 和 [MijiaDeck v1.1.2 的 CameraRelay.java](https://github.com/Songmanual/MijiaDeck/blob/v1.1.2/tools/camera_relay/CameraRelay.java) 运行以下命令。
+可在中继目录中生成 `camera-relay-dual-lens-v4.jar`，用于切换镜头、显示握手进度和视频接收速率、调整清晰度。实际分辨率取决于摄像机返回的码流。公网播放时，在详情页选择另一个镜头并点击「悬浮窗」，会复用当前公网会话来切换画面。需要同时观看时，在「悬浮窗」按钮上右键选择「另开悬浮窗」。使用 Windows JDK 21 和 [MijiaDeck v1.1.2 的 CameraRelay.java](https://github.com/Songmanual/MijiaDeck/blob/v1.1.2/tools/camera_relay/CameraRelay.java) 运行以下命令。
 
 ```powershell
 python -m tools.build_camera_relay_second_lens --jdk 'C:\path\to\jdk-21' --source 'C:\path\to\CameraRelay.java' --relay-dir $env:MIHOME_CAMERA_RELAY_DIR

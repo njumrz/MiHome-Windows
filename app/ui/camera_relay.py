@@ -14,7 +14,8 @@ from app.core.models import CameraRelayAuthorization
 
 logger = logging.getLogger(__name__)
 _SECOND_LENS_JAR = "camera-relay-second-lens.jar"
-_DUAL_LENS_JARS = ("camera-relay-dual-lens-v3.jar", "camera-relay-dual-lens-v2.jar", "camera-relay-dual-lens.jar")
+_QUALITY_JAR = "camera-relay-dual-lens-v4.jar"
+_DUAL_LENS_JARS = (_QUALITY_JAR, "camera-relay-dual-lens-v3.jar", "camera-relay-dual-lens-v2.jar", "camera-relay-dual-lens.jar")
 _RELAY_TIMEOUT_MS = 15_000
 _RELAY_RETRY_TIMEOUT_MS = 30_000
 _RELAY_STAGES = {
@@ -31,6 +32,7 @@ _ERRORS = {
     b"ERROR CONFIG": "公网中继组件配置无效。",
     b"ERROR AUTH": "摄像机未接受公网视频授权。",
     b"ERROR SWITCH": "切换镜头后未收到画面，请再次点击「悬浮窗」重试。",
+    b"ERROR QUALITY": "切换清晰度后未收到画面，请重试。",
     b"ERROR STREAM": "公网视频已断开，请再次点击「悬浮窗」重试。",
 }
 _STARTUP_FAILURES = {
@@ -62,6 +64,7 @@ class CameraRelay(QObject):
     failed = Signal(str)
     retry = Signal()
     received_bytes = Signal(object)
+    quality_changed = Signal(int, bool)
 
     def __init__(self, base: Path, *, lens: int = 1, dual_lens: bool = False):
         # 悬浮窗关闭后仍有机会让中继正常释放摄像机会话。
@@ -69,11 +72,13 @@ class CameraRelay(QObject):
         self._lens = lens
         dual_jar = _dual_lens_jar(base)
         self._switchable = dual_jar is not None and (dual_lens or lens == 2)
+        self.supports_quality = dual_jar is not None and dual_jar.name == _QUALITY_JAR
         self._attempt = 0
         self._closed = False
         self._retrying = False
         self._retried: set[bytes] = set()
         self._quality = "1"
+        self._pending_quality: int | None = None
         self._phase = b""
         self._relay_stage = ""
         self._payload = b""
@@ -131,18 +136,37 @@ class CameraRelay(QObject):
         if (not self._switchable or self._closed or self._phase != b"READY"
                 or lens not in (1, 2) or lens == self._lens):
             return False
+        if not self._change_stream("SWITCH", lens, 26_000):
+            return False
+        self._lens = lens
+        logger.info("正在通过现有公网会话切换到镜头 %s", lens)
+        return True
+
+    @property
+    def quality(self) -> int:
+        return int(self._quality)
+
+    def set_quality(self, quality: int) -> bool:
+        if not self.supports_quality or quality not in (0, 1, 2) or quality == self.quality:
+            return False
+        if not self._change_stream("QUALITY", quality, 48_000):
+            return False
+        self._pending_quality = quality
+        return True
+
+    def _change_stream(self, action: str, value: int, timeout: int) -> bool:
+        if self._closed or self._phase != b"READY":
+            return False
         try:
             url = self._stream_url()
         except OSError:
             return False
-        command = f"SWITCH {lens} {url.port()} {url.path()}\n".encode("ascii")
+        command = f"{action} {value} {url.port()} {url.path()}\n".encode("ascii")
         if self._process.write(command) != len(command):
             return False
         self._url = url
-        self._lens = lens
-        self._phase = b"SWITCH"
-        self._timeout.start(26000)
-        logger.info("正在通过现有公网会话切换到镜头 %s", lens)
+        self._phase = action.encode("ascii")
+        self._timeout.start(timeout)
         return True
 
     def stop(self) -> None:
@@ -192,10 +216,16 @@ class CameraRelay(QObject):
                 self.progress.emit(message)
             elif status in _STARTUP_FAILURES:
                 self._retry_connection(status)
+            elif status in (b"QUALITY ACCEPTED", b"QUALITY REJECTED") and self._pending_quality is not None:
+                accepted = status == b"QUALITY ACCEPTED"
+                if accepted:
+                    self._quality = str(self._pending_quality)
+                self._pending_quality = None
+                self.quality_changed.emit(self.quality, accepted)
             elif status in _ERRORS:
                 self._fail(_ERRORS[status])
             elif status == b"READY":
-                if self._phase == b"SWITCH":
+                if self._phase in (b"SWITCH", b"QUALITY"):
                     logger.info("镜头 %s: 切换后已收到视频关键帧", self._lens)
                 else:
                     logger.info("镜头 %s: 第 %s 次公网连接已收到视频关键帧", self._lens, self._attempt)
@@ -232,6 +262,8 @@ class CameraRelay(QObject):
             self._retry_connection(b"ERROR MEDIA")
         elif self._phase == b"SWITCH":
             self._fail(_ERRORS[b"ERROR SWITCH"])
+        elif self._phase == b"QUALITY":
+            self._fail(_ERRORS[b"ERROR QUALITY"])
         else:
             self._fail("连接摄像机公网中继超时。")
 
