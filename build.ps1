@@ -281,6 +281,7 @@ $NuitkaArgs = @(
     "run.py"
     "--standalone"
     "--enable-plugin=pyside6"
+    "--include-qt-plugins=multimedia"
     "--windows-console-mode=disable"
     "--windows-icon-from-ico=app\ui\icon.ico"
     "--include-package=app.siui"

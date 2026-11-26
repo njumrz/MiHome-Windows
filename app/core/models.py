@@ -63,6 +63,16 @@ class DeviceDetail:
     actions: list[ActionInfo]
 
 
+@dataclass(frozen=True, repr=False)
+class CameraRelayAuthorization:
+    uid: str
+    relay_config: str
+    client_public_key: str
+    client_private_key: str
+    camera_public_key: str
+    signature: str
+
+
 @dataclass
 class SceneInfo:
     """米家手动场景（米家 APP → 智能 → 手动控制 中创建的项）。
