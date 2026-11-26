@@ -5,7 +5,7 @@
 
 import shiboken6
 from PySide6.QtCore import QPoint, QRect, Qt
-from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QImage, QPainter
+from PySide6.QtGui import QAction, QColor, QGuiApplication, QImage, QPainter
 from PySide6.QtWidgets import QMenu, QWidget
 
 from app.core import camera_stream
@@ -13,6 +13,7 @@ from app.core.jobs import JobExecutor
 from app.core.models import DeviceInfo
 from app.core.service import MijiaService
 from app.ui.camera_playback import CameraPlayback
+from app.ui.camera_view import draw_frame
 
 _PRESETS = (("小", 320), ("中", 460), ("大", 680))
 _DEFAULT_WIDTH = 380
@@ -74,22 +75,8 @@ class CameraPipWindow(QWidget):
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         rect = self.rect().adjusted(1, 1, -1, -1)
-        p.fillRect(self.rect(), QColor("#0b0f0e"))
-        if not self._image.isNull():
-            # 保持比例居中，多余部分留黑
-            scaled = self._image.size().scaled(rect.size(),
-                                               Qt.AspectRatioMode.KeepAspectRatio)
-            target = QRect(0, 0, scaled.width(), scaled.height())
-            target.moveCenter(rect.center())
-            p.drawImage(target, self._image)
-        else:
-            p.setPen(QColor(0x8a, 0x9a, 0x96))
-            font = QFont()
-            font.setPointSize(9)
-            p.setFont(font)
-            p.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._status_text)
+        draw_frame(p, rect, self._image, self._status_text)
         # 细边框，深色背景上也能看出窗口边界
         p.setPen(QColor(0x2a, 0x3a, 0x36))
         p.drawRect(self.rect().adjusted(0, 0, -1, -1))

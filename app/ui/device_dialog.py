@@ -32,6 +32,7 @@ class DeviceDetailDialog(OverlayDialog):
         self._lens: QComboBox | None = None
         self._pip_button: QPushButton | None = None
         self._web_button: QPushButton | None = None
+        self._camera_view = None
 
         outer = QVBoxLayout(self._panel)
         outer.setContentsMargins(16, 16, 16, 16)
@@ -65,6 +66,13 @@ class DeviceDetailDialog(OverlayDialog):
             self._style_camera_buttons()
         header.addWidget(self._make_close_button())
         outer.addLayout(header)
+
+        if camera_stream.is_camera(device.model):
+            from app.ui.camera_view import CameraView
+
+            self._camera_view = CameraView(device, service, jobs, self._panel)
+            outer.addWidget(self._camera_view, stretch=3)
+            self.finished.connect(self._camera_view.stop)
 
         # 工作台
         self._workbench = WorkbenchPanel(service, jobs, self._panel)
@@ -116,6 +124,8 @@ class DeviceDetailDialog(OverlayDialog):
                           on_error=lambda _exc: show(False), priority=PRIORITY_CONTROL)
 
     def load(self) -> None:
+        if self._camera_view is not None:
+            self._camera_view.start()
         self._workbench.show_device(self.device.did, online=self.device.online, device=self.device)
 
     def retheme(self) -> None:
