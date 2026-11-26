@@ -17,6 +17,7 @@
 - **定时开关**：给指定设备配「每天某时刻打开/关闭」，同一设备可配多条（如 7:00 开灯、23:00 关灯）；到点自动执行并提示，错过时间不补执行只提醒。**需应用保持运行**（最小化到托盘也算），关掉程序不会触发
 - **设备控制**：根据设备 spec 元数据自动生成控件——布尔属性映射开关、数值属性映射滑块（自动套用范围与步长）、枚举属性映射下拉框
 - **动作执行**：设备支持的动作渲染为按钮，执行前二次确认
+- **摄像机直播**：在本机配置 go2rtc 后，可从摄像机详情页打开网页播放或置顶悬浮窗。小米智能摄像机 4 双摄版可分别选择两个镜头。
 - **系统托盘**：最小化到托盘，左键单击切换快捷控制窗口、双击直接唤出主窗口；支持快捷设备控制、场景一键执行、小爱音响快捷控制、小爱语音指令，快捷窗口支持单列/双列卡片切换与设备/场景混排排序
 - **桌面挂件**：常驻桌面的设备控制面板——自选放哪些设备与场景、无级调透明度、单排最多放 9 张设备卡片、一键收起为细横条、背景色可调；窗口可置顶可锁定；开关在「设置 → 应用功能 → 桌面挂件」，开启后随应用启动自动显示；设备清单与托盘快捷窗口相互独立，卡片顺序可直接在面板上拖动调整
 - **定时任务**：针对具体设备定时设置开启、关闭
@@ -143,6 +144,22 @@ python -m venv .venv
 
 源码模式下运行日志会同时写入项目根的 `debug.log`（结构化）与 `app.log`
 （控制台原始输出 + 崩溃堆栈），排查问题时两个都值得看。
+
+### 摄像机直播
+
+按 [go2rtc 的小米摄像机说明](https://github.com/AlexxIT/go2rtc/blob/master/internal/xiaomi/README.md)添加摄像机。电脑与摄像机需要能在局域网内通信。
+将 go2rtc 的网页端口和 RTSP 端口分别设为 `127.0.0.1:1984` 和 `127.0.0.1:8554`，流名设为米家设备的 DID。
+双摄的第二路用同一设备的取流地址加 `channel=2`，流名在 DID 后加 `-2`。
+
+可将 `go2rtc.exe` 和 `go2rtc.yaml` 放在 `%LOCALAPPDATA%\MiHome-Camera`，或启动前设置 `MIHOME_CAMERA_DIR` 指向配置目录。打开摄像机详情页并选择「网页播放」或「悬浮窗」，客户端会按需启动 go2rtc。
+
+本地试用公网中继时，可将 `MIHOME_CAMERA_RELAY_DIR` 指向 [MijiaDeck 便携包](https://github.com/Songmanual/MijiaDeck/releases)中包含 `camera-relay.jar` 与 `runtime\bin\java.exe` 的目录，再启动客户端。配置生效后，「悬浮窗」会先探测所选镜头的局域网视频，取不到画面时自动切到公网中继。握手首次等待 15 秒，失败时会重新申请授权并用新的连接重试一次，第二次最多等待 30 秒。中继接通后如果没有画面，会换一档画质重试一次。悬浮窗显示连接失败后，再点一次「悬浮窗」可以重新连接。
+
+双摄可在中继目录中生成 `camera-relay-dual-lens-v2.jar`，用于切换镜头和显示握手进度。公网播放时，在详情页选择另一个镜头并点击「悬浮窗」，会复用当前公网会话来切换画面。需要同时观看时，在「悬浮窗」按钮上右键选择「另开悬浮窗」。使用 Windows JDK 21 和 [MijiaDeck v1.1.2 的 CameraRelay.java](https://github.com/Songmanual/MijiaDeck/blob/v1.1.2/tools/camera_relay/CameraRelay.java) 运行以下命令。
+
+```powershell
+python -m tools.build_camera_relay_second_lens --jdk 'C:\path\to\jdk-21' --source 'C:\path\to\CameraRelay.java' --relay-dir $env:MIHOME_CAMERA_RELAY_DIR
+```
 
 ## 本地缓存与数据存储
 

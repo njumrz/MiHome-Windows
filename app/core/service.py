@@ -35,7 +35,7 @@ from mijiaAPI.devices import DevAction, DevProp
 from mijiaAPI.miutils import generate_enc_params, gen_nonce, get_signed_nonce
 
 from . import icon_store, name_store, spec_zh
-from .models import ActionInfo, DeviceDetail, DeviceInfo, PropInfo, SceneInfo
+from .models import ActionInfo, CameraRelayAuthorization, DeviceDetail, DeviceInfo, PropInfo, SceneInfo
 from .net_guard import install_default_timeout
 
 # 上游多处 HTTP 调用没有 timeout（登录取二维码、刷新 token、设备列表），
@@ -211,6 +211,38 @@ class MijiaService:
             self._api._complete_qr_login(login_data)
         except Exception as exc:
             raise _wrap_error(exc, "扫码登录未完成") from exc
+
+    @_serialized
+    def authorize_camera_relay(self, did: str) -> CameraRelayAuthorization:
+        """使用现有米家会话为一次公网预览申请临时授权。"""
+        from Crypto.PublicKey import ECC
+
+        key = ECC.generate(curve="Curve25519")
+        public_key = key.public_key().export_key(format="raw").hex()
+        try:
+            data = self._api._request("/v2/device/miss_get_vendor", {
+                "did": did,
+                "app_pubkey": public_key,
+                "support_vendors": "TUTK_CS2_MTP",
+            })
+        except Exception:
+            raise ServiceError("获取米家公网视频授权失败，请检查登录状态和摄像机连接。") from None
+
+        vendor = data.get("vendor") if isinstance(data, dict) else None
+        if not isinstance(vendor, dict) or vendor.get("vendor") != 4:
+            raise ServiceError("米家未为这台摄像机提供 CS2 公网中继。")
+
+        params = vendor.get("vendor_params")
+        if not isinstance(params, dict):
+            params = {}
+        authorization = (params.get("p2p_id"), params.get("init_string"), public_key,
+                         key.seed.hex(), data.get("public_key"), data.get("sign"))
+        if any(not isinstance(value, str) or not value or len(value) > 16384
+               or "\r" in value or "\n" in value for value in authorization):
+            raise ServiceError("米家返回的公网视频授权不完整。")
+        if re.fullmatch(r"[0-9A-Fa-f]{64}", authorization[4]) is None:
+            raise ServiceError("米家返回的摄像机公钥无效。")
+        return CameraRelayAuthorization(*authorization)
 
     # ---------- 设备列表 ----------
 
