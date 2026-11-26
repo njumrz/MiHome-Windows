@@ -10,8 +10,9 @@ from tests._isolate import isolate
 isolate()
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QPointF, Qt, Signal
 from PySide6.QtGui import QImage
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from app.core.models import DeviceInfo
@@ -83,6 +84,36 @@ class CameraViewTest(unittest.TestCase):
         self.assertEqual(len(dialog._camera_view.tiles), 1)
         dialog.finished.emit(0)
         playback.stop.assert_called_once()
+        dialog.deleteLater()
+
+    def test_expand_swap_zoom_and_escape_preserve_both_sessions(self):
+        with patch("app.ui.camera_view.has_second_lens", return_value=True):
+            dialog = DeviceDetailDialog(Mock(), Mock(), self.device)
+        dialog.resize(900, 650)
+        dialog.load()
+        view = dialog._camera_view
+        first, second = view.tiles
+        active = [tile.playback for tile in view.tiles]
+        first._expand.click()
+        self.assertTrue(view.expanded)
+        self.assertEqual(dialog._panel.geometry(), dialog.rect())
+        self.assertTrue(second.canvas._thumbnail)
+        second.canvas.clicked.emit()
+        self.assertIs(view._primary, second)
+        self.assertTrue(first.canvas._thumbnail)
+        second.canvas.set_zoom(10)
+        second.canvas._pan_to(QPointF(0, 1))
+        self.assertEqual(second.canvas._zoom, 4.0)
+        self.assertEqual(second.canvas._center, QPointF(0.125, 0.875))
+        second.canvas.set_zoom(1)
+        self.assertEqual(second.canvas._center, QPointF(0.5, 0.5))
+        QTest.keyClick(dialog, Qt.Key.Key_Escape)
+        self.assertFalse(view.expanded)
+        self.assertEqual([tile.playback for tile in view.tiles], active)
+        for playback in active:
+            playback.start.assert_called_once()
+            playback.stop.assert_not_called()
+        view.stop()
         dialog.deleteLater()
 
 
