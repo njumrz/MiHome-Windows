@@ -30,6 +30,8 @@ class FakePlayback(QObject):
         self.lens = lens
         self.start = Mock()
         self.stop = Mock()
+        self.sample_receive_rate = Mock()
+        self.receive_rate = Mock(return_value=None)
 
 
 class CameraViewTest(unittest.TestCase):
@@ -115,6 +117,18 @@ class CameraViewTest(unittest.TestCase):
             playback.stop.assert_not_called()
         view.stop()
         dialog.deleteLater()
+
+    def test_receive_rate_adds_available_feeds(self):
+        view = self.make_view(dual=True)
+        view.start()
+        view._update_rate()
+        self.assertEqual(view._speed.text(), "— KB/s")
+        view.tiles[0].playback.receive_rate.return_value = 1500
+        view.tiles[1].playback.receive_rate.return_value = 2500
+        view._update_rate()
+        self.assertEqual(view._speed.text(), "4.0 KB/s")
+        view.stop()
+        self.assertEqual(view._speed.text(), "— KB/s")
 
 
 if __name__ == "__main__":

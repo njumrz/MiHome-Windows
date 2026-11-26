@@ -2,6 +2,7 @@
 """单路摄像机视频会话，独立于画面的布局与窗口。"""
 
 from functools import partial
+from time import monotonic
 
 import shiboken6
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
@@ -9,6 +10,7 @@ from PySide6.QtGui import QImage
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 
 from app.core import camera_stream
+from app.core.camera_rate import ReceiveRate
 from app.core.jobs import PRIORITY_CONTROL, JobExecutor
 from app.core.models import CameraRelayAuthorization, DeviceInfo
 from app.core.service import MijiaService
@@ -35,6 +37,8 @@ class CameraPlayback(QObject):
         self._url = QUrl()
         self._retries = 0
         self._has_frame = False
+        self._recv_rate = ReceiveRate()
+        self._rate_polling = False
 
         self._sink = QVideoSink(self)
         self._sink.videoFrameChanged.connect(self._on_frame)
@@ -80,9 +84,11 @@ class CameraPlayback(QObject):
         self._relay.ready.connect(self._play)
         self._relay.failed.connect(self._fail)
         self._relay.retry.connect(self._authorize)
+        self._relay.received_bytes.connect(self._record_received)
         self._authorize()
 
     def _authorize(self) -> None:
+        self._recv_rate.clear()
         self.status_changed.emit("正在获取米家视频授权…")
         self._jobs.submit(partial(self._service.authorize_camera_relay, self.device.did),
                           on_success=self._start_relay, on_error=lambda exc: self._fail(str(exc)),
@@ -146,6 +152,22 @@ class CameraPlayback(QObject):
     def set_muted(self, muted: bool) -> None:
         self._audio.setMuted(muted)
 
+    def receive_rate(self) -> float | None:
+        return self._recv_rate.current(monotonic())
+
+    def sample_receive_rate(self) -> None:
+        if self._stopped or self._url.isEmpty() or self.is_remote or self._rate_polling:
+            return
+        self._rate_polling = True
+        stream_name = camera_stream.stream_name(self.device.did, self.lens)
+        self._jobs.submit(partial(camera_stream.received_bytes, stream_name),
+                          on_success=self._record_received, on_error=lambda _: self._record_received(None))
+
+    def _record_received(self, total: int | None) -> None:
+        self._rate_polling = False
+        if total is not None and not self._stopped:
+            self._recv_rate.record(total, monotonic())
+
     def _stop_player(self) -> None:
         self._url = QUrl()
         self._has_frame = False
@@ -158,6 +180,7 @@ class CameraPlayback(QObject):
         if self._stopped:
             return
         self._stopped = True
+        self._recv_rate.clear()
         self._stop_player()
         if self._relay is not None and shiboken6.isValid(self._relay):
             self._relay.stop()

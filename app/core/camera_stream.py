@@ -3,6 +3,7 @@
 # Copyright (C) 2026 MiHome-Windows contributors
 """本机 go2rtc 服务与摄像机直播地址。"""
 
+import json
 import os
 import socket
 import subprocess
@@ -51,6 +52,24 @@ def probe_local_video(stream_name: str) -> bool:
         return response.status == 200 and response.read(8)[4:] == b"ftyp"
     except (OSError, HTTPException):
         return False
+    finally:
+        connection.close()
+
+
+def received_bytes(stream_name: str) -> int | None:
+    connection = HTTPConnection(_HOST, _API_PORT, timeout=1.0)
+    try:
+        connection.request("GET", f"/api/streams?{urlencode({'src': stream_name})}")
+        response = connection.getresponse()
+        if response.status != 200:
+            return None
+        data = json.loads(response.read(256 * 1024))
+        producers = data.get("producers") if isinstance(data, dict) else None
+        counters = [item.get("bytes_recv") for item in (producers or []) if isinstance(item, dict)]
+        valid = [value for value in counters if type(value) is int and value >= 0]
+        return sum(valid) if valid else None
+    except (OSError, HTTPException, ValueError, TypeError):
+        return None
     finally:
         connection.close()
 

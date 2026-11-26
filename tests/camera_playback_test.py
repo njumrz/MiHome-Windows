@@ -16,6 +16,7 @@ from PySide6.QtCore import QEventLoop, QTimer, QUrl
 from PySide6.QtWidgets import QApplication
 
 from app.core.camera_stream import probe_local_video
+from app.core.camera_rate import ReceiveRate
 from app.core.models import CameraRelayAuthorization, DeviceInfo
 from app.ui.camera_pip import CameraPipWindow, _OPEN, open_camera_pip, show_existing_pip
 from app.ui.camera_playback import CameraPlayback
@@ -27,6 +28,18 @@ class CameraPlaybackTest(unittest.TestCase):
         self.device = DeviceInfo("fixture", "Test camera", "test.camera.example", "Test home", "Test room", True)
         self.service = Mock()
         self.jobs = Mock()
+
+    def test_receive_rate_handles_stall_and_counter_reset(self):
+        rate = ReceiveRate()
+        rate.record(1000, 1)
+        self.assertIsNone(rate.current(1))
+        rate.record(3500, 2)
+        self.assertEqual(rate.current(2), 2500)
+        self.assertEqual(rate.current(6), 0)
+        rate.record(100, 7)
+        self.assertIsNone(rate.current(7))
+        rate.record(300, 9)
+        self.assertEqual(rate.current(9), 100)
 
     @classmethod
     def setUpClass(cls):
