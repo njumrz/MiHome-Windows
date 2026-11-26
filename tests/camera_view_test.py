@@ -27,6 +27,7 @@ class FakePlayback(QObject):
     resolution_changed = Signal(QSize)
     quality_changed = Signal(int, bool)
     audio_failed = Signal(str)
+    talk_changed = Signal(bool, str)
 
     def __init__(self, _device, lens, _service, _jobs, parent=None):
         super().__init__(parent)
@@ -38,6 +39,9 @@ class FakePlayback(QObject):
         self.quality = None
         self.set_quality = Mock(return_value=True)
         self.set_muted = Mock()
+        self.can_talk = False
+        self.start_talk = Mock(return_value=True)
+        self.stop_talk = Mock()
 
 
 class CameraViewTest(unittest.TestCase):
@@ -167,6 +171,22 @@ class CameraViewTest(unittest.TestCase):
         self.assertFalse(view._speaker.isChecked())
         self.assertEqual(view._audio_status.text(), "音频不可用")
         second.playback.set_muted.assert_called_with(True)
+
+    def test_talk_requires_a_user_click_and_ends_on_main_feed_change(self):
+        view = self.make_view(dual=True)
+        view.start()
+        first, second = view.tiles
+        first.playback.start_talk.assert_not_called()
+        first.playback.can_talk = True
+        first.video_changed.emit()
+        view._talk.click()
+        first.playback.start_talk.assert_called_once()
+        first.playback.talk_changed.emit(True, "通话中")
+        self.assertEqual(view._talk.text(), "结束通话")
+        second._expand.click()
+        first.playback.stop_talk.assert_called_once()
+        second.playback.start_talk.assert_not_called()
+        self.assertFalse(view._talk.isChecked())
 
 
 if __name__ == "__main__":

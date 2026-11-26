@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from zipfile import ZIP_DEFLATED, ZipFile
 
 _CLASS_NAME = "CameraRelayDualLens"
-_JAR_NAME = "camera-relay-dual-lens-v5.jar"
+_JAR_NAME = "camera-relay-dual-lens-v6.jar"
 _CHECK = "CAMERA_RELAY_DUAL_LENS"
 
 
@@ -27,12 +27,122 @@ def build(jdk: Path, source: Path, relay_dir: Path) -> Path:
         raise ValueError("Expected the CameraRelay.java source from MijiaDeck v1.1.2")
     java = java.replace(start_call, "startLens();")
     replacements = {
+        "import java.nio.charset.StandardCharsets;": '''import java.nio.charset.StandardCharsets;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import micam.pppp.Frame;
+import micam.pppp.Msg;''',
         "    private static int videoCodec;": r'''    private static int videoCodec;
     private static volatile int lens = 1;
     private static volatile String[] nextStream;
     private static String relayStage;
     private static long videoBytes;
     private static long lastByteCount;
+    private static volatile byte[] mediaKey;
+    private static final int SPEAKER_START = 0x106;
+    private static final int SPEAKER_RESPONSE = 0x107;
+    private static final int SPEAKER_STOP = 0x108;
+    private static final int CODEC_PCMU = 1026;
+    private static int receivedAudioCodec;
+    private static int speakerCodec;
+    private static long speakerStarted;
+    private static int speakerSequence;
+    private static boolean speakerResponded;
+
+    private static synchronized void startTalk() {
+        if (speakerStarted != 0) return;
+        camera.sendEncrypted(SPEAKER_START, "");
+        speakerStarted = System.nanoTime();
+        speakerSequence = 0;
+        receivedAudioCodec = 0;
+        speakerResponded = false;
+    }
+
+    private static synchronized void stopTalk() {
+        if (speakerStarted == 0) return;
+        speakerStarted = 0;
+        speakerCodec = 0;
+        camera.sendEncrypted(SPEAKER_STOP, "");
+        report("TALK STOPPED");
+    }
+
+    private static synchronized void updateTalk(MediaPacket packet) {
+        if (speakerStarted == 0) return;
+        if (packet != null && (packet.codecId() == MediaPacket.CODEC_OPUS
+                || packet.codecId() == MediaPacket.CODEC_PCMA || packet.codecId() == CODEC_PCMU)) {
+            receivedAudioCodec = packet.codecId();
+        }
+        if (!speakerResponded) {
+            MissClient.Response response = camera.awaitResponse(Duration.ofMillis(1));
+            if (response != null) {
+                try {
+                    int command = response.command();
+                    if (command == MissClient.CMD_ENCODED) {
+                        byte[] payload = MissCrypto.decrypt(mediaKey, response.body());
+                        if (payload.length >= 4) command = ByteBuffer.wrap(payload).getInt();
+                    }
+                    if (command == SPEAKER_RESPONSE) {
+                        speakerResponded = true;
+                        report("TALK PEER RESPONSE");
+                    }
+                } catch (RuntimeException ignored) { }
+            }
+        }
+        if (speakerCodec != 0) return;
+        long elapsed = System.nanoTime() - speakerStarted;
+        if (elapsed >= Duration.ofSeconds(1).toNanos() && receivedAudioCodec != 0) {
+            speakerCodec = receivedAudioCodec;
+            report(switch (speakerCodec) {
+                case MediaPacket.CODEC_OPUS -> "TALK OPUS";
+                case CODEC_PCMU -> "TALK PCMU";
+                default -> "TALK PCMA";
+            });
+        } else if (elapsed >= Duration.ofSeconds(5).toNanos()) {
+            stopTalk();
+            report("TALK FAILED");
+        }
+    }
+
+    private static synchronized void sendTalkAudio(String encoded) {
+        if (speakerCodec == 0 || encoded.length() > 1700) return;
+        byte[] audioPayload = Base64.getDecoder().decode(encoded);
+        boolean valid = speakerCodec == MediaPacket.CODEC_OPUS
+                ? audioPayload.length > 0 && audioPayload.length <= 1275 : audioPayload.length == 320;
+        if (!valid) return;
+        connection.sendRaw(talkFrame(mediaKey, speakerCodec, speakerSequence++, System.currentTimeMillis(), audioPayload));
+        if (speakerSequence == 1) report("TALK PACKET SENT");
+    }
+
+    private static byte[] talkFrame(byte[] key, int codec, int sequence, long time, byte[] audioPayload) {
+        byte[] encrypted = MissCrypto.encrypt(key, audioPayload);
+        // The channel 3 envelope is big-endian. The MISS media header is little-endian.
+        ByteBuffer frame = ByteBuffer.allocate(8 + MediaPacket.HEADER_LEN + encrypted.length);
+        frame.put((byte) 0xd1).put((byte) 3).putShort((short) sequence).putInt(MediaPacket.HEADER_LEN + encrypted.length);
+        frame.order(ByteOrder.LITTLE_ENDIAN).putInt(encrypted.length).putInt(codec);
+        frame.position(8 + 16);
+        frame.putLong(time);
+        frame.position(8 + MediaPacket.HEADER_LEN);
+        frame.put(encrypted);
+        return Frame.encode(Msg.DRW, frame.array());
+    }
+
+    private static void checkTalkFrame() {
+        byte[] key = new byte[32];
+        byte[] sample = {1, 2, 3};
+        byte[] datagram = talkFrame(key, MediaPacket.CODEC_OPUS, 17, 100, sample);
+        Frame frame = Frame.parse(datagram, datagram.length);
+        ByteBuffer header = ByteBuffer.wrap(frame.payload());
+        if (frame.type() != Msg.DRW || header.get() != (byte) 0xd1 || header.get() != 3
+                || header.getShort() != 17 || header.getInt() != frame.payload().length - 8) {
+            throw new IllegalStateException("Invalid audio envelope");
+        }
+        byte[] media = java.util.Arrays.copyOfRange(frame.payload(), 8, frame.payload().length);
+        MediaPacket decoded = MediaPacket.parse(media, key);
+        if (decoded.codecId() != MediaPacket.CODEC_OPUS || decoded.timestampMs() != 100
+                || !java.util.Arrays.equals(decoded.payload(), sample)) {
+            throw new IllegalStateException("Invalid audio payload");
+        }
+    }
 
     private static void reportVideoBytes(MediaPacket packet) {
         videoBytes += packet.payload().length;
@@ -110,8 +220,14 @@ def build(jdk: Path, source: Path, relay_dir: Path) -> Path:
 ''',
         '        String phase = "CONFIG";': '''        String phase = "CONFIG";
         if (args.length == 1 && args[0].equals("2")) lens = 2;''',
+        f'            report("{_CHECK}");': f'            checkTalkFrame();\n            report("{_CHECK}");',
         'new RelaySession(Uid.parse(uid), InitString.servers(init), null)':
             'new RelaySession(Uid.parse(uid), InitString.servers(init), CameraRelayDualLens::relayProgress)',
+        '            camera.useSessionKey(MissCrypto.sessionKey(clientPrivate, devicePublic));':
+            '            mediaKey = MissCrypto.sessionKey(clientPrivate, devicePublic);\n            camera.useSessionKey(mediaKey);',
+        '        try { if (camera != null) camera.stopVideo(); } catch (Exception ignored) { }':
+            '        try { stopTalk(); } catch (Exception ignored) { }\n'
+            '        try { if (camera != null) camera.stopVideo(); } catch (Exception ignored) { }',
         '                    server.publish(packet);':
             '                    server.publish(packet);\n                    reportVideoBytes(packet);',
         '''                    report("AUDIO 8000 " + Base64.getEncoder().encodeToString(pcm(packet)));
@@ -121,7 +237,13 @@ def build(jdk: Path, source: Path, relay_dir: Path) -> Path:
                     report("AUDIO " + rate + " " + Base64.getEncoder().encodeToString(pcm(packet)));
                 } else if (packet != null && audio && packet.codecId() == 1032) {
                     report("AUDIO OPUS " + Base64.getEncoder().encodeToString(packet.payload()));''',
-        '                            if (command.matches("QUALITY [012]")) {': r'''                            if (command.matches("(?:SWITCH [12]|QUALITY [012]) [0-9]{1,5} /camera-[a-f0-9]{32}\\.ts")) {
+        '                            if (command.matches("QUALITY [012]")) {': r'''                            if (command.equals("TALK START")) {
+                                startTalk();
+                            } else if (command.equals("TALK STOP")) {
+                                stopTalk();
+                            } else if (command.startsWith("TALK DATA ")) {
+                                sendTalkAudio(command.substring(10));
+                            } else if (command.matches("(?:SWITCH [12]|QUALITY [012]) [0-9]{1,5} /camera-[a-f0-9]{32}\\.ts")) {
                                 nextStream = command.split(" ");
                             } else if (command.matches("QUALITY [012]")) {''',
         '''            long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
@@ -146,7 +268,8 @@ def build(jdk: Path, source: Path, relay_dir: Path) -> Path:
                     phase = "STREAM";
                     lastFrame = System.nanoTime();
                 }
-                MediaPacket packet = camera.nextMedia(Duration.ofMillis(500));''',
+                MediaPacket packet = camera.nextMedia(Duration.ofMillis(500));
+                updateTalk(packet);''',
     }
     for original, replacement in replacements.items():
         if java.count(original) != 1:

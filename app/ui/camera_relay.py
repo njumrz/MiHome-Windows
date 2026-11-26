@@ -2,7 +2,7 @@
 # Copyright (C) 2026 MiHome-Windows contributors
 """本机可选的 MijiaDeck 公网中继进程。"""
 
-from base64 import b64decode
+from base64 import b64decode, b64encode
 from binascii import Error as Base64Error
 import logging
 import os
@@ -16,8 +16,8 @@ from app.core.models import CameraRelayAuthorization
 
 logger = logging.getLogger(__name__)
 _SECOND_LENS_JAR = "camera-relay-second-lens.jar"
-_AUDIO_JAR = "camera-relay-dual-lens-v5.jar"
-_QUALITY_JARS = (_AUDIO_JAR, "camera-relay-dual-lens-v4.jar")
+_TALK_JAR = "camera-relay-dual-lens-v6.jar"
+_QUALITY_JARS = (_TALK_JAR, "camera-relay-dual-lens-v5.jar", "camera-relay-dual-lens-v4.jar")
 _DUAL_LENS_JARS = (*_QUALITY_JARS, "camera-relay-dual-lens-v3.jar", "camera-relay-dual-lens-v2.jar", "camera-relay-dual-lens.jar")
 _RELAY_TIMEOUT_MS = 15_000
 _RELAY_RETRY_TIMEOUT_MS = 30_000
@@ -70,6 +70,8 @@ class CameraRelay(QObject):
     quality_changed = Signal(int, bool)
     audio_frame = Signal(str, int, bytes)
     audio_failed = Signal(str)
+    talk_ready = Signal(str)
+    talk_failed = Signal(str)
 
     def __init__(self, base: Path, *, lens: int = 1, dual_lens: bool = False):
         # 悬浮窗关闭后仍有机会让中继正常释放摄像机会话。
@@ -78,6 +80,7 @@ class CameraRelay(QObject):
         dual_jar = _dual_lens_jar(base)
         self._switchable = dual_jar is not None and (dual_lens or lens == 2)
         self.supports_quality = dual_jar is not None and dual_jar.name in _QUALITY_JARS
+        self.supports_talk = dual_jar is not None and dual_jar.name == _TALK_JAR
         self._attempt = 0
         self._closed = False
         self._retrying = False
@@ -85,6 +88,8 @@ class CameraRelay(QObject):
         self._quality = "1"
         self._pending_quality: int | None = None
         self._audio_enabled = False
+        self._talk_requested = False
+        self._talk_codec: str | None = None
         self._phase = b""
         self._relay_stage = ""
         self._payload = b""
@@ -111,6 +116,9 @@ class CameraRelay(QObject):
         self._timeout = QTimer(self)
         self._timeout.setSingleShot(True)
         self._timeout.timeout.connect(self._on_timeout)
+        self._talk_timeout = QTimer(self)
+        self._talk_timeout.setSingleShot(True)
+        self._talk_timeout.timeout.connect(self._fail_talk)
 
     def start(self, authorization: CameraRelayAuthorization) -> None:
         if self._closed:
@@ -168,6 +176,35 @@ class CameraRelay(QObject):
         if self._process.write(command) == len(command):
             self._audio_enabled = enabled
 
+    def start_talk(self) -> bool:
+        if (self._closed or not self.supports_talk or self._phase != b"READY"
+                or not self._audio_enabled or self._talk_requested):
+            return False
+        command = b"TALK START\n"
+        if self._process.write(command) != len(command):
+            return False
+        self._talk_requested = True
+        self._talk_timeout.start(7000)
+        return True
+
+    def stop_talk(self) -> None:
+        self._talk_timeout.stop()
+        if self._talk_requested:
+            self._talk_requested = False
+            self._talk_codec = None
+            self._process.write(b"TALK STOP\n")
+
+    def send_talk_audio(self, packet: bytes) -> None:
+        if (self._closed or self._phase != b"READY" or self._talk_codec is None
+                or not 0 < len(packet) <= 1275 or self._process.bytesToWrite() > 4096):
+            return
+        self._process.write(b"TALK DATA " + b64encode(packet) + b"\n")
+
+    def _fail_talk(self) -> None:
+        if self._talk_requested:
+            self.stop_talk()
+            self.talk_failed.emit("摄像头通话连接超时或音频格式不可用。")
+
     def _read_audio(self, line: bytes) -> None:
         if not self._audio_enabled:
             return
@@ -203,6 +240,7 @@ class CameraRelay(QObject):
     def stop(self) -> None:
         if self._closed:
             return
+        self.stop_talk()
         self._closed = True
         self._payload = b""
         if self._process.state() == QProcess.ProcessState.NotRunning:
@@ -228,6 +266,14 @@ class CameraRelay(QObject):
                 continue
             if status.startswith(b"AUDIO "):
                 self._read_audio(status)
+            elif status in (b"TALK OPUS", b"TALK PCMA", b"TALK PCMU") and self._talk_requested and self._talk_codec is None:
+                self._talk_timeout.stop()
+                self._talk_codec = status[5:].decode("ascii").lower()
+                self.talk_ready.emit(self._talk_codec)
+            elif status == b"TALK FAILED":
+                self._fail_talk()
+            elif status == b"TALK PEER RESPONSE" and self._talk_requested:
+                logger.info("镜头 %s: 收到摄像头的通话应答", self._lens)
             elif status == b"NOTICE AUDIO_UNSUPPORTED" and self._audio_enabled:
                 self.audio_failed.emit("摄像头返回了当前不支持的音频格式。")
             elif status.startswith(b"BYTES "):

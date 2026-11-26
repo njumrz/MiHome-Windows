@@ -108,6 +108,8 @@ class CameraTile(QWidget):
     enlarge = Signal()
     session_changed = Signal()
     audio_failed = Signal(str)
+    talk_changed = Signal(bool, str)
+    video_changed = Signal()
 
     def __init__(self, device, lens, service, jobs, parent=None):
         super().__init__(parent)
@@ -159,6 +161,7 @@ class CameraTile(QWidget):
         self.playback.resolution_changed.connect(self._update_resolution)
         self.playback.quality_changed.connect(self._quality_result)
         self.playback.audio_failed.connect(self.audio_failed)
+        self.playback.talk_changed.connect(self.talk_changed)
         self.session_changed.emit()
         self.playback.start()
 
@@ -189,6 +192,7 @@ class CameraTile(QWidget):
         if available and quality is not None:
             with QSignalBlocker(self._quality):
                 self._quality.setCurrentIndex(self._quality.findData(quality))
+        self.video_changed.emit()
 
     def set_view_mode(self, expanded, thumbnail):
         self._header_widget.setVisible(not thumbnail)
@@ -204,6 +208,7 @@ class CameraView(QWidget):
         self._open = False
         self._columns = 0
         self._primary = None
+        self._talk_tile = None
         lens_count = 2 if has_second_lens(device.model) else 1
         self.tiles = [CameraTile(device, lens, service, jobs, self) for lens in range(1, lens_count + 1)]
         for tile in self.tiles:
@@ -211,6 +216,9 @@ class CameraView(QWidget):
             tile.canvas.clicked.connect(lambda t=tile: self._toggle_primary(t))
             tile.audio_failed.connect(lambda message, t=tile: self._audio_failed(t, message))
             tile.session_changed.connect(self._sync_audio)
+            tile.session_changed.connect(self._sync_talk_button)
+            tile.video_changed.connect(self._sync_talk_button)
+            tile.talk_changed.connect(lambda active, message, t=tile: self._talk_state(t, active, message))
         content = QWidget(self)
         self._grid = QGridLayout(content)
         self._grid.setContentsMargins(0, 0, 0, 0)
@@ -230,10 +238,22 @@ class CameraView(QWidget):
         self._speaker.setCheckable(True)
         self._speaker.setAccessibleName("播放现场声音")
         self._speaker.toggled.connect(self._sync_audio)
-        outer.addWidget(self._speaker, alignment=Qt.AlignmentFlag.AlignRight)
+        controls = QHBoxLayout()
+        controls.addStretch()
+        controls.addWidget(self._speaker)
+        self._talk = QPushButton("通话", self)
+        self._talk.setCheckable(True)
+        self._talk.setEnabled(False)
+        self._talk.setToolTip("支持公网通话的画面载入后可开启麦克风")
+        self._talk.toggled.connect(self._toggle_talk)
+        controls.addWidget(self._talk)
+        outer.addLayout(controls)
         self._audio_status = QLabel(self)
         outer.addWidget(self._audio_status, alignment=Qt.AlignmentFlag.AlignRight)
         self._audio_status.hide()
+        self._talk_status = QLabel(self)
+        outer.addWidget(self._talk_status, alignment=Qt.AlignmentFlag.AlignRight)
+        self._talk_status.hide()
         outer.addWidget(content, stretch=1)
         self._rate_timer = QTimer(self)
         self._rate_timer.setInterval(1000)
@@ -249,6 +269,7 @@ class CameraView(QWidget):
 
     def stop(self):
         self._open = False
+        self._hang_up()
         self._speaker.setChecked(False)
         self._audio_status.hide()
         self._rate_timer.stop()
@@ -273,6 +294,38 @@ class CameraView(QWidget):
             self._speaker.setChecked(False)
             self._audio_status.setText(message)
             self._audio_status.show()
+
+    def _sync_talk_button(self):
+        playback = self._active_tile().playback
+        self._talk.setEnabled(self._talk_tile is not None or (playback is not None and playback.can_talk))
+
+    def _toggle_talk(self, enabled):
+        if not enabled:
+            self._hang_up()
+            return
+        tile = self._active_tile()
+        self._talk_tile = tile
+        if tile.playback is None or not tile.playback.start_talk():
+            self._talk_state(tile, False, "当前摄像头连接暂无法通话。")
+
+    def _talk_state(self, tile, active, message):
+        if tile is not self._talk_tile:
+            return
+        with QSignalBlocker(self._talk):
+            self._talk.setChecked(active)
+        self._talk.setText("结束通话" if active else "通话")
+        self._talk_status.setText(message)
+        self._talk_status.setVisible(bool(message))
+        if not active:
+            self._talk_tile = None
+        self._sync_talk_button()
+
+    def _hang_up(self):
+        tile = self._talk_tile
+        if tile is not None:
+            if tile.playback is not None:
+                tile.playback.stop_talk()
+            self._talk_state(tile, False, "")
 
     def _update_rate(self):
         rates = []
@@ -314,6 +367,8 @@ class CameraView(QWidget):
             self.collapse()
             return
         was_expanded = self.expanded
+        if self._active_tile() is not tile:
+            self._hang_up()
         self._primary = tile
         for index, item in enumerate(self.tiles):
             self._grid.removeWidget(item)
@@ -329,6 +384,7 @@ class CameraView(QWidget):
                 item.raise_()
         self._size_thumbnail()
         self._sync_audio()
+        self._sync_talk_button()
         if not was_expanded:
             self.expanded_changed.emit(True)
 
@@ -340,8 +396,11 @@ class CameraView(QWidget):
 
     def collapse(self):
         if self.expanded:
+            if self._primary is not self.tiles[0]:
+                self._hang_up()
             self._primary = None
             self._columns = 0
             self._arrange(len(self.tiles) if self.width() >= 640 else 1)
             self._sync_audio()
+            self._sync_talk_button()
             self.expanded_changed.emit(False)

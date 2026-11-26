@@ -14,7 +14,7 @@ from app.core.camera_rate import ReceiveRate
 from app.core.jobs import PRIORITY_CONTROL, JobExecutor
 from app.core.models import CameraRelayAuthorization, DeviceInfo
 from app.core.service import MijiaService
-from app.ui.camera_audio import CameraAudioOutput
+from app.ui.camera_audio import CameraAudioOutput, CameraMicrophone
 from app.ui.camera_relay import CameraRelay, configured_relay, supports_second_lens
 
 _PLAYER_RETRIES = 2
@@ -27,6 +27,7 @@ class CameraPlayback(QObject):
     resolution_changed = Signal(QSize)
     quality_changed = Signal(int, bool)
     audio_failed = Signal(str)
+    talk_changed = Signal(bool, str)
 
     def __init__(self, device: DeviceInfo, lens: int, service: MijiaService,
                  jobs: JobExecutor, parent: QObject | None = None):
@@ -45,6 +46,7 @@ class CameraPlayback(QObject):
         self._recv_rate = ReceiveRate()
         self._rate_polling = False
         self._muted = True
+        self._talk_requested = False
 
         self._sink = QVideoSink(self)
         self._sink.videoFrameChanged.connect(self._on_frame)
@@ -52,6 +54,9 @@ class CameraPlayback(QObject):
         self._audio.setMuted(True)
         self._remote_audio = CameraAudioOutput(self)
         self._remote_audio.failed.connect(self._audio_failed)
+        self._microphone = CameraMicrophone(self)
+        self._microphone.packet.connect(self._send_talk_packet)
+        self._microphone.failed.connect(self.stop_talk)
         self._player = QMediaPlayer(self)
         self._player.setVideoSink(self._sink)
         self._player.setAudioOutput(self._audio)
@@ -96,6 +101,8 @@ class CameraPlayback(QObject):
         self._relay.quality_changed.connect(self.quality_changed)
         self._relay.audio_frame.connect(self._on_audio)
         self._relay.audio_failed.connect(self._audio_failed)
+        self._relay.talk_ready.connect(self._on_talk_ready)
+        self._relay.talk_failed.connect(self.stop_talk)
         self._authorize()
 
     def _authorize(self) -> None:
@@ -142,6 +149,7 @@ class CameraPlayback(QObject):
         if self._retries >= _PLAYER_RETRIES:
             self._fail("视频加载失败，请重试。")
             return
+        self.stop_talk("视频连接中断，已结束通话。")
         self._has_frame = False
         self.status_changed.emit("连接中断，正在重试…")
         self._retry_timer.start()
@@ -173,7 +181,7 @@ class CameraPlayback(QObject):
         if self._muted:
             self._remote_audio.stop()
         if self._relay is not None and shiboken6.isValid(self._relay):
-            self._relay.set_audio(not self._muted)
+            self._relay.set_audio(not self._muted or self._talk_requested)
 
     def _on_audio(self, codec: str, rate: int, data: bytes) -> None:
         if not self._stopped and not self._muted:
@@ -183,6 +191,46 @@ class CameraPlayback(QObject):
         if not self._stopped and not self._muted:
             self.set_muted(True)
             self.audio_failed.emit(message)
+
+    @property
+    def can_talk(self) -> bool:
+        relay = self._relay
+        return (not self._stopped and self._has_frame and relay is not None
+                and shiboken6.isValid(relay) and relay.supports_talk)
+
+    def start_talk(self) -> bool:
+        if not self.can_talk or self._talk_requested:
+            return False
+        self._talk_requested = True
+        self._apply_mute()
+        if not self._relay.start_talk():
+            self._talk_requested = False
+            self._apply_mute()
+            return False
+        self.talk_changed.emit(True, "正在连接摄像头通话…")
+        return True
+
+    def _on_talk_ready(self, codec: str) -> None:
+        if not self._talk_requested or self._stopped:
+            return
+        if self._microphone.start(codec):
+            self.talk_changed.emit(True, "通话中")
+        else:
+            self.stop_talk("无法打开麦克风。")
+
+    def _send_talk_packet(self, packet: bytes) -> None:
+        if self._talk_requested and not self._stopped and shiboken6.isValid(self._relay):
+            self._relay.send_talk_audio(packet)
+
+    def stop_talk(self, message: str = "") -> None:
+        if not self._talk_requested:
+            return
+        self._talk_requested = False
+        self._microphone.stop()
+        if self._relay is not None and shiboken6.isValid(self._relay):
+            self._relay.stop_talk()
+        self._apply_mute()
+        self.talk_changed.emit(False, message)
 
     @property
     def quality(self) -> int | None:
@@ -214,6 +262,7 @@ class CameraPlayback(QObject):
             self._recv_rate.record(total, monotonic())
 
     def _stop_player(self) -> None:
+        self.stop_talk()
         self._url = QUrl()
         self._has_frame = False
         self._resolution = QSize()
@@ -226,6 +275,7 @@ class CameraPlayback(QObject):
     def stop(self) -> None:
         if self._stopped:
             return
+        self.stop_talk()
         self._stopped = True
         self._remote_audio.stop()
         self._recv_rate.clear()
