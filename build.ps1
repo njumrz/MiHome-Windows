@@ -59,7 +59,8 @@ New-Item -ItemType Directory -Force -Path $env:NUITKA_CACHE_DIR | Out-Null
 # ============================================================
 $Pip = Join-Path $Root ".venv\Scripts\pip.exe"
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
-if (-not (Test-Path $Pip)) {
+$installDependencies = -not (Test-Path $Pip)
+if ($installDependencies) {
     Write-Host "[1/3] Creating virtual environment..." -ForegroundColor Cyan
 
     # 尝试 py launcher，失败则用 python
@@ -74,6 +75,15 @@ if (-not (Test-Path $Pip)) {
         exit 1
     }
 
+} else {
+    & $Python -c "import av" 2>$null
+    $installDependencies = $LASTEXITCODE -ne 0
+    if (-not $installDependencies) {
+        Write-Host "[OK] Virtual environment ready" -ForegroundColor Green
+    }
+}
+
+if ($installDependencies) {
     Write-Host "[2/3] Installing dependencies... (showing pip progress; a 'new version of pip' notice is informational only)" -ForegroundColor Cyan
     # 不用 --quiet：依赖下载可达数百 MB，静默会让人误以为卡死；
     # pip 的升级提示/进度条直接透传
@@ -84,8 +94,6 @@ if (-not (Test-Path $Pip)) {
     }
 
     Write-Host "[3/3] 初始化完成`n" -ForegroundColor Green
-} else {
-    Write-Host "[OK] Virtual environment ready" -ForegroundColor Green
 }
 
 # ============================================================

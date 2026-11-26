@@ -106,6 +106,8 @@ class CameraCanvas(QWidget):
 
 class CameraTile(QWidget):
     enlarge = Signal()
+    session_changed = Signal()
+    audio_failed = Signal(str)
 
     def __init__(self, device, lens, service, jobs, parent=None):
         super().__init__(parent)
@@ -156,6 +158,8 @@ class CameraTile(QWidget):
         self.playback.failed.connect(self._show_retry)
         self.playback.resolution_changed.connect(self._update_resolution)
         self.playback.quality_changed.connect(self._quality_result)
+        self.playback.audio_failed.connect(self.audio_failed)
+        self.session_changed.emit()
         self.playback.start()
 
     def stop(self):
@@ -205,6 +209,8 @@ class CameraView(QWidget):
         for tile in self.tiles:
             tile.enlarge.connect(lambda t=tile: self._toggle_primary(t))
             tile.canvas.clicked.connect(lambda t=tile: self._toggle_primary(t))
+            tile.audio_failed.connect(lambda message, t=tile: self._audio_failed(t, message))
+            tile.session_changed.connect(self._sync_audio)
         content = QWidget(self)
         self._grid = QGridLayout(content)
         self._grid.setContentsMargins(0, 0, 0, 0)
@@ -220,6 +226,14 @@ class CameraView(QWidget):
         self._speed.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._speed.setAccessibleName("视频接收速率")
         outer.addWidget(self._speed)
+        self._speaker = QPushButton("声音", self)
+        self._speaker.setCheckable(True)
+        self._speaker.setAccessibleName("播放现场声音")
+        self._speaker.toggled.connect(self._sync_audio)
+        outer.addWidget(self._speaker, alignment=Qt.AlignmentFlag.AlignRight)
+        self._audio_status = QLabel(self)
+        outer.addWidget(self._audio_status, alignment=Qt.AlignmentFlag.AlignRight)
+        self._audio_status.hide()
         outer.addWidget(content, stretch=1)
         self._rate_timer = QTimer(self)
         self._rate_timer.setInterval(1000)
@@ -235,10 +249,30 @@ class CameraView(QWidget):
 
     def stop(self):
         self._open = False
+        self._speaker.setChecked(False)
+        self._audio_status.hide()
         self._rate_timer.stop()
         self._speed.setText("— KB/s")
         for tile in self.tiles:
             tile.stop()
+
+    def _active_tile(self):
+        return self._primary or self.tiles[0]
+
+    def _sync_audio(self):
+        active = self._active_tile()
+        self._audio_status.hide()
+        for tile in self.tiles:
+            if tile is not active and tile.playback is not None:
+                tile.playback.set_muted(True)
+        if active.playback is not None:
+            active.playback.set_muted(not self._speaker.isChecked())
+
+    def _audio_failed(self, tile, message):
+        if tile is self._active_tile() and self._speaker.isChecked():
+            self._speaker.setChecked(False)
+            self._audio_status.setText(message)
+            self._audio_status.show()
 
     def _update_rate(self):
         rates = []
@@ -294,6 +328,7 @@ class CameraView(QWidget):
                 self._grid.addWidget(item, 0, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
                 item.raise_()
         self._size_thumbnail()
+        self._sync_audio()
         if not was_expanded:
             self.expanded_changed.emit(True)
 
@@ -308,4 +343,5 @@ class CameraView(QWidget):
             self._primary = None
             self._columns = 0
             self._arrange(len(self.tiles) if self.width() >= 640 else 1)
+            self._sync_audio()
             self.expanded_changed.emit(False)

@@ -2,6 +2,8 @@
 # Copyright (C) 2026 MiHome-Windows contributors
 """本机可选的 MijiaDeck 公网中继进程。"""
 
+from base64 import b64decode
+from binascii import Error as Base64Error
 import logging
 import os
 import socket
@@ -14,8 +16,9 @@ from app.core.models import CameraRelayAuthorization
 
 logger = logging.getLogger(__name__)
 _SECOND_LENS_JAR = "camera-relay-second-lens.jar"
-_QUALITY_JAR = "camera-relay-dual-lens-v4.jar"
-_DUAL_LENS_JARS = (_QUALITY_JAR, "camera-relay-dual-lens-v3.jar", "camera-relay-dual-lens-v2.jar", "camera-relay-dual-lens.jar")
+_AUDIO_JAR = "camera-relay-dual-lens-v5.jar"
+_QUALITY_JARS = (_AUDIO_JAR, "camera-relay-dual-lens-v4.jar")
+_DUAL_LENS_JARS = (*_QUALITY_JARS, "camera-relay-dual-lens-v3.jar", "camera-relay-dual-lens-v2.jar", "camera-relay-dual-lens.jar")
 _RELAY_TIMEOUT_MS = 15_000
 _RELAY_RETRY_TIMEOUT_MS = 30_000
 _RELAY_STAGES = {
@@ -65,6 +68,8 @@ class CameraRelay(QObject):
     retry = Signal()
     received_bytes = Signal(object)
     quality_changed = Signal(int, bool)
+    audio_frame = Signal(str, int, bytes)
+    audio_failed = Signal(str)
 
     def __init__(self, base: Path, *, lens: int = 1, dual_lens: bool = False):
         # 悬浮窗关闭后仍有机会让中继正常释放摄像机会话。
@@ -72,13 +77,14 @@ class CameraRelay(QObject):
         self._lens = lens
         dual_jar = _dual_lens_jar(base)
         self._switchable = dual_jar is not None and (dual_lens or lens == 2)
-        self.supports_quality = dual_jar is not None and dual_jar.name == _QUALITY_JAR
+        self.supports_quality = dual_jar is not None and dual_jar.name in _QUALITY_JARS
         self._attempt = 0
         self._closed = False
         self._retrying = False
         self._retried: set[bytes] = set()
         self._quality = "1"
         self._pending_quality: int | None = None
+        self._audio_enabled = False
         self._phase = b""
         self._relay_stage = ""
         self._payload = b""
@@ -122,6 +128,7 @@ class CameraRelay(QObject):
         self._phase = b""
         self._relay_stage = ""
         self._attempt += 1
+        self._audio_enabled = False
         self._timeout.start(10_000)
         self._process.start()
 
@@ -153,6 +160,30 @@ class CameraRelay(QObject):
             return False
         self._pending_quality = quality
         return True
+
+    def set_audio(self, enabled: bool) -> None:
+        if self._closed or self._phase != b"READY" or self._audio_enabled == enabled:
+            return
+        command = b"AUDIO 1\n" if enabled else b"AUDIO 0\n"
+        if self._process.write(command) == len(command):
+            self._audio_enabled = enabled
+
+    def _read_audio(self, line: bytes) -> None:
+        if not self._audio_enabled:
+            return
+        parts = line.split(b" ", 2)
+        if len(parts) != 3 or parts[1] not in (b"8000", b"16000", b"OPUS") or len(parts[2]) > 8192:
+            return
+        try:
+            pcm = b64decode(parts[2], validate=True)
+        except Base64Error:
+            return
+        if not pcm:
+            return
+        if parts[1] == b"OPUS":
+            self.audio_frame.emit("opus", 48000, pcm)
+        elif len(pcm) % 2 == 0:
+            self.audio_frame.emit("pcm", int(parts[1]), pcm)
 
     def _change_stream(self, action: str, value: int, timeout: int) -> bool:
         if self._closed or self._phase != b"READY":
@@ -195,7 +226,11 @@ class CameraRelay(QObject):
             status = bytes(self._process.readLine()).strip()
             if self._closed or self._retrying:
                 continue
-            if status.startswith(b"BYTES "):
+            if status.startswith(b"AUDIO "):
+                self._read_audio(status)
+            elif status == b"NOTICE AUDIO_UNSUPPORTED" and self._audio_enabled:
+                self.audio_failed.emit("摄像头返回了当前不支持的音频格式。")
+            elif status.startswith(b"BYTES "):
                 value = status[6:]
                 if 0 < len(value) <= 19 and value.isdigit():
                     self.received_bytes.emit(int(value))

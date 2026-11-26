@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from zipfile import ZIP_DEFLATED, ZipFile
 
 _CLASS_NAME = "CameraRelayDualLens"
-_JAR_NAME = "camera-relay-dual-lens-v4.jar"
+_JAR_NAME = "camera-relay-dual-lens-v5.jar"
 _CHECK = "CAMERA_RELAY_DUAL_LENS"
 
 
@@ -114,6 +114,13 @@ def build(jdk: Path, source: Path, relay_dir: Path) -> Path:
             'new RelaySession(Uid.parse(uid), InitString.servers(init), CameraRelayDualLens::relayProgress)',
         '                    server.publish(packet);':
             '                    server.publish(packet);\n                    reportVideoBytes(packet);',
+        '''                    report("AUDIO 8000 " + Base64.getEncoder().encodeToString(pcm(packet)));
+                } else if (packet != null && audio && packet.codecId() == 1032) {
+                    report("NOTICE AUDIO_UNSUPPORTED");
+                    audio = false;''': '''                    int rate = ((packet.flags() >>> 3) & 15) == 0 ? 8000 : 16000;
+                    report("AUDIO " + rate + " " + Base64.getEncoder().encodeToString(pcm(packet)));
+                } else if (packet != null && audio && packet.codecId() == 1032) {
+                    report("AUDIO OPUS " + Base64.getEncoder().encodeToString(packet.payload()));''',
         '                            if (command.matches("QUALITY [012]")) {': r'''                            if (command.matches("(?:SWITCH [12]|QUALITY [012]) [0-9]{1,5} /camera-[a-f0-9]{32}\\.ts")) {
                                 nextStream = command.split(" ");
                             } else if (command.matches("QUALITY [012]")) {''',
