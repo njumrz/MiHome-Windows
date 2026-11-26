@@ -14,7 +14,7 @@ from app.core.models import CameraRelayAuthorization
 
 logger = logging.getLogger(__name__)
 _SECOND_LENS_JAR = "camera-relay-second-lens.jar"
-_DUAL_LENS_JARS = ("camera-relay-dual-lens-v2.jar", "camera-relay-dual-lens.jar")
+_DUAL_LENS_JARS = ("camera-relay-dual-lens-v3.jar", "camera-relay-dual-lens-v2.jar", "camera-relay-dual-lens.jar")
 _RELAY_TIMEOUT_MS = 15_000
 _RELAY_RETRY_TIMEOUT_MS = 30_000
 _RELAY_STAGES = {
@@ -61,13 +61,14 @@ class CameraRelay(QObject):
     ready = Signal(QUrl)
     failed = Signal(str)
     retry = Signal()
+    received_bytes = Signal(object)
 
     def __init__(self, base: Path, *, lens: int = 1, dual_lens: bool = False):
         # 悬浮窗关闭后仍有机会让中继正常释放摄像机会话。
         super().__init__(QCoreApplication.instance())
         self._lens = lens
-        dual_jar = _dual_lens_jar(base) if dual_lens or lens == 2 else None
-        self._switchable = dual_jar is not None
+        dual_jar = _dual_lens_jar(base)
+        self._switchable = dual_jar is not None and (dual_lens or lens == 2)
         self._attempt = 0
         self._closed = False
         self._retrying = False
@@ -170,7 +171,11 @@ class CameraRelay(QObject):
             status = bytes(self._process.readLine()).strip()
             if self._closed or self._retrying:
                 continue
-            if status == b"PHASE RELAY":
+            if status.startswith(b"BYTES "):
+                value = status[6:]
+                if 0 < len(value) <= 19 and value.isdigit():
+                    self.received_bytes.emit(int(value))
+            elif status == b"PHASE RELAY":
                 self._phase = status
                 retry = b"ERROR RELAY" in self._retried
                 self._timeout.start(_RELAY_RETRY_TIMEOUT_MS if retry else _RELAY_TIMEOUT_MS)

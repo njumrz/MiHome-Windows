@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from zipfile import ZIP_DEFLATED, ZipFile
 
 _CLASS_NAME = "CameraRelayDualLens"
-_JAR_NAME = "camera-relay-dual-lens-v2.jar"
+_JAR_NAME = "camera-relay-dual-lens-v3.jar"
 _CHECK = "CAMERA_RELAY_DUAL_LENS"
 
 
@@ -31,6 +31,17 @@ def build(jdk: Path, source: Path, relay_dir: Path) -> Path:
     private static volatile int lens = 1;
     private static volatile String[] nextStream;
     private static String relayStage;
+    private static long videoBytes;
+    private static long lastByteCount;
+
+    private static void reportVideoBytes(MediaPacket packet) {
+        videoBytes += packet.payload().length;
+        long now = System.nanoTime();
+        if (now - lastByteCount >= Duration.ofSeconds(1).toNanos()) {
+            report("BYTES " + videoBytes);
+            lastByteCount = now;
+        }
+    }
 
     private static void relayProgress(String message) {
         String stage;
@@ -82,6 +93,8 @@ def build(jdk: Path, source: Path, relay_dir: Path) -> Path:
         if (args.length == 1 && args[0].equals("2")) lens = 2;''',
         'new RelaySession(Uid.parse(uid), InitString.servers(init), null)':
             'new RelaySession(Uid.parse(uid), InitString.servers(init), CameraRelayDualLens::relayProgress)',
+        '                    server.publish(packet);':
+            '                    server.publish(packet);\n                    reportVideoBytes(packet);',
         '                            if (command.matches("QUALITY [012]")) {': r'''                            if (command.matches("SWITCH [12] [0-9]{1,5} /camera-[a-f0-9]{32}\\.ts")) {
                                 nextStream = command.split(" ");
                             } else if (command.matches("QUALITY [012]")) {''',

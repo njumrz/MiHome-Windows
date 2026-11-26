@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """设备详情里的实时视频及其布局。"""
 
-from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
@@ -175,9 +175,25 @@ class CameraView(QWidget):
         for tile in self.tiles:
             tile.enlarge.connect(lambda t=tile: self._toggle_primary(t))
             tile.canvas.clicked.connect(lambda t=tile: self._toggle_primary(t))
-        self._grid = QGridLayout(self)
+        content = QWidget(self)
+        self._grid = QGridLayout(content)
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._grid.setSpacing(8)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        title = QLabel(self)
+        title.setTextFormat(Qt.TextFormat.PlainText)
+        title.setText(device.name)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        outer.addWidget(title)
+        self._speed = QLabel("— KB/s", self)
+        self._speed.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._speed.setAccessibleName("视频接收速率")
+        outer.addWidget(self._speed)
+        outer.addWidget(content, stretch=1)
+        self._rate_timer = QTimer(self)
+        self._rate_timer.setInterval(1000)
+        self._rate_timer.timeout.connect(self._update_rate)
         self._arrange(1)
 
     def start(self):
@@ -185,11 +201,24 @@ class CameraView(QWidget):
             self._open = True
             for tile in self.tiles:
                 tile.start()
+            self._rate_timer.start()
 
     def stop(self):
         self._open = False
+        self._rate_timer.stop()
+        self._speed.setText("— KB/s")
         for tile in self.tiles:
             tile.stop()
+
+    def _update_rate(self):
+        rates = []
+        for tile in self.tiles:
+            if tile.playback is not None:
+                tile.playback.sample_receive_rate()
+                rate = tile.playback.receive_rate()
+                if rate is not None:
+                    rates.append(rate)
+        self._speed.setText(f"{sum(rates) / 1000:.1f} KB/s" if rates else "— KB/s")
 
     def _arrange(self, columns):
         if columns == self._columns:
