@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """设备详情里的实时视频及其布局。"""
 
-from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QPointF, QRect, QRectF, QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter
-from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from app.core.camera_stream import has_second_lens
 from app.ui.camera_playback import CameraPlayback
@@ -122,6 +122,8 @@ class CameraTile(QWidget):
         self.header = QHBoxLayout(self._header_widget)
         self.header.setContentsMargins(0, 0, 0, 0)
         self.header.addWidget(QLabel(f"镜头 {lens}", self))
+        self._resolution = QLabel(self)
+        self.header.addWidget(self._resolution)
         self.header.addStretch()
         self.header.addWidget(self._retry)
         zoom_button = QPushButton("×1.0", self)
@@ -129,6 +131,13 @@ class CameraTile(QWidget):
         zoom_button.clicked.connect(lambda: self.canvas.set_zoom(1.0))
         self.canvas.zoom_changed.connect(lambda zoom: zoom_button.setText(f"×{zoom:.1f}"))
         self.header.addWidget(zoom_button)
+        self._quality = QComboBox(self)
+        self._quality.setAccessibleName(f"镜头 {lens} 清晰度")
+        for value, label in enumerate(("自动", "标清", "高清")):
+            self._quality.addItem(label, value)
+        self._quality.hide()
+        self._quality.activated.connect(self._select_quality)
+        self.header.addWidget(self._quality)
         self._expand = QPushButton("放大", self)
         self._expand.clicked.connect(self.enlarge)
         self.header.addWidget(self._expand)
@@ -145,6 +154,8 @@ class CameraTile(QWidget):
         self.playback.frame_changed.connect(self.canvas.set_frame)
         self.playback.status_changed.connect(self.canvas.set_status)
         self.playback.failed.connect(self._show_retry)
+        self.playback.resolution_changed.connect(self._update_resolution)
+        self.playback.quality_changed.connect(self._quality_result)
         self.playback.start()
 
     def stop(self):
@@ -155,6 +166,25 @@ class CameraTile(QWidget):
 
     def _show_retry(self, _message):
         self._retry.show()
+
+    def _select_quality(self, index):
+        if self.playback is not None and not self.playback.set_quality(self._quality.itemData(index)):
+            self._quality_result(self.playback.quality, False)
+
+    def _quality_result(self, value, accepted):
+        with QSignalBlocker(self._quality):
+            self._quality.setCurrentIndex(self._quality.findData(value))
+        self._quality.setToolTip("" if accepted else "该清晰度未应用，已恢复原档位")
+
+    def _update_resolution(self, size):
+        available = size.width() > 0 and size.height() > 0
+        self._resolution.setText(f"{size.width()}×{size.height()}" if available else "")
+        quality = self.playback.quality if self.playback is not None else None
+        self._quality.setVisible(quality is not None)
+        self._quality.setEnabled(available)
+        if available and quality is not None:
+            with QSignalBlocker(self._quality):
+                self._quality.setCurrentIndex(self._quality.findData(quality))
 
     def set_view_mode(self, expanded, thumbnail):
         self._header_widget.setVisible(not thumbnail)

@@ -41,6 +41,27 @@ class CameraPlaybackTest(unittest.TestCase):
         rate.record(300, 9)
         self.assertEqual(rate.current(9), 100)
 
+    def test_quality_change_uses_the_same_relay_and_handles_rejection(self):
+        base = _DATA_DIR / "quality"
+        base.mkdir()
+        (base / "camera-relay-dual-lens-v4.jar").touch()
+        relay = CameraRelay(base, lens=2)
+        relay._phase = b"READY"
+        outcomes = []
+        relay.quality_changed.connect(lambda quality, accepted: outcomes.append((quality, accepted)))
+        try:
+            for response in (b"QUALITY REJECTED", b"QUALITY ACCEPTED"):
+                with patch.object(relay._process, "write", side_effect=len) as write:
+                    self.assertTrue(relay.set_quality(2))
+                    write.assert_called_once_with(f"QUALITY 2 {relay._url.port()} {relay._url.path()}\n".encode("ascii"))
+                with patch.object(relay._process, "canReadLine", side_effect=(True, True, False)), patch.object(
+                    relay._process, "readLine", side_effect=(response, b"READY")
+                ):
+                    relay._read_status()
+            self.assertEqual(outcomes, [(1, False), (2, True)])
+        finally:
+            relay.stop()
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication(sys.argv)

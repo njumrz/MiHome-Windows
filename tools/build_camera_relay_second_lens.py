@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from zipfile import ZIP_DEFLATED, ZipFile
 
 _CLASS_NAME = "CameraRelayDualLens"
-_JAR_NAME = "camera-relay-dual-lens-v3.jar"
+_JAR_NAME = "camera-relay-dual-lens-v4.jar"
 _CHECK = "CAMERA_RELAY_DUAL_LENS"
 
 
@@ -73,17 +73,36 @@ def build(jdk: Path, source: Path, relay_dir: Path) -> Path:
         throw new IllegalStateException();
     }
 
-    private static void switchStream(String[] fields) throws Exception {
-        server.close();
+    private static void pauseVideo() {
         camera.stopVideo();
         long deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos();
         while (camera.nextMedia(Duration.ofMillis(350)) != null) {
             if (stopped.get() || System.nanoTime() >= deadline) throw new IllegalStateException();
         }
+    }
+
+    private static void switchStream(String[] fields) throws Exception {
+        boolean changeQuality = fields[0].equals("QUALITY");
+        if (!changeQuality) pauseVideo();
         if (stopped.get()) return;
-        lens = Integer.parseInt(fields[1]);
-        startLens();
-        MediaPacket first = nextKeyframe();
+        int previousQuality = quality;
+        int value = Integer.parseInt(fields[1]);
+        if (changeQuality) quality = value;
+        else lens = value;
+        MediaPacket first;
+        try {
+            startLens();
+            first = nextKeyframe();
+            if (changeQuality) report("QUALITY ACCEPTED");
+        } catch (RuntimeException error) {
+            if (!changeQuality || stopped.get()) throw error;
+            quality = previousQuality;
+            startLens();
+            first = nextKeyframe();
+            report("QUALITY REJECTED");
+        }
+        if (stopped.get()) return;
+        server.close();
         server = new HttpStreamServer(Integer.parseInt(fields[2]), fields[3], null);
         server.start();
         server.publish(first);
@@ -95,7 +114,7 @@ def build(jdk: Path, source: Path, relay_dir: Path) -> Path:
             'new RelaySession(Uid.parse(uid), InitString.servers(init), CameraRelayDualLens::relayProgress)',
         '                    server.publish(packet);':
             '                    server.publish(packet);\n                    reportVideoBytes(packet);',
-        '                            if (command.matches("QUALITY [012]")) {': r'''                            if (command.matches("SWITCH [12] [0-9]{1,5} /camera-[a-f0-9]{32}\\.ts")) {
+        '                            if (command.matches("QUALITY [012]")) {': r'''                            if (command.matches("(?:SWITCH [12]|QUALITY [012]) [0-9]{1,5} /camera-[a-f0-9]{32}\\.ts")) {
                                 nextStream = command.split(" ");
                             } else if (command.matches("QUALITY [012]")) {''',
         '''            long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
@@ -113,7 +132,7 @@ def build(jdk: Path, source: Path, relay_dir: Path) -> Path:
                 String[] requested = nextStream;
                 if (requested != null) {
                     nextStream = null;
-                    phase = "SWITCH";
+                    phase = requested[0];
                     switchStream(requested);
                     if (stopped.get()) return;
                     report("READY");
