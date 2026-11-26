@@ -17,6 +17,8 @@ dependencies = [
     # 摄像机公网预览使用 X25519 生成临时会话密钥。
     "pycryptodome>=3.23",
     "PySide6>=6.7",
+    # 摄像头 Opus 音频解码。
+    "av>=16",
     # 登录对话框渲染二维码用；虽是 mijiaAPI 的传递依赖，仍显式声明防止被动移除
     "qrcode>=8",
     # Material Design 图标，用于所有 UI 图标渲染

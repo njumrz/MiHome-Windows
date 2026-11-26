@@ -26,6 +26,7 @@ class FakePlayback(QObject):
     failed = Signal(str)
     resolution_changed = Signal(QSize)
     quality_changed = Signal(int, bool)
+    audio_failed = Signal(str)
 
     def __init__(self, _device, lens, _service, _jobs, parent=None):
         super().__init__(parent)
@@ -36,6 +37,7 @@ class FakePlayback(QObject):
         self.receive_rate = Mock(return_value=None)
         self.quality = None
         self.set_quality = Mock(return_value=True)
+        self.set_muted = Mock()
 
 
 class CameraViewTest(unittest.TestCase):
@@ -147,6 +149,24 @@ class CameraViewTest(unittest.TestCase):
         first.playback.set_quality.assert_not_called()
         second.playback.quality_changed.emit(1, False)
         self.assertEqual(second._quality.currentData(), 1)
+
+    def test_audio_follows_the_main_tile_and_defaults_to_muted(self):
+        view = self.make_view(dual=True)
+        view.start()
+        first, second = view.tiles
+        original = [tile.playback for tile in view.tiles]
+        for playback in original:
+            playback.set_muted.assert_called_with(True)
+        view._speaker.setChecked(True)
+        first.playback.set_muted.assert_called_with(False)
+        second._expand.click()
+        first.playback.set_muted.assert_called_with(True)
+        second.playback.set_muted.assert_called_with(False)
+        self.assertEqual([tile.playback for tile in view.tiles], original)
+        second.playback.audio_failed.emit("音频不可用")
+        self.assertFalse(view._speaker.isChecked())
+        self.assertEqual(view._audio_status.text(), "音频不可用")
+        second.playback.set_muted.assert_called_with(True)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from app.core.camera_rate import ReceiveRate
 from app.core.jobs import PRIORITY_CONTROL, JobExecutor
 from app.core.models import CameraRelayAuthorization, DeviceInfo
 from app.core.service import MijiaService
+from app.ui.camera_audio import CameraAudioOutput
 from app.ui.camera_relay import CameraRelay, configured_relay, supports_second_lens
 
 _PLAYER_RETRIES = 2
@@ -25,6 +26,7 @@ class CameraPlayback(QObject):
     failed = Signal(str)
     resolution_changed = Signal(QSize)
     quality_changed = Signal(int, bool)
+    audio_failed = Signal(str)
 
     def __init__(self, device: DeviceInfo, lens: int, service: MijiaService,
                  jobs: JobExecutor, parent: QObject | None = None):
@@ -42,11 +44,14 @@ class CameraPlayback(QObject):
         self._resolution = QSize()
         self._recv_rate = ReceiveRate()
         self._rate_polling = False
+        self._muted = True
 
         self._sink = QVideoSink(self)
         self._sink.videoFrameChanged.connect(self._on_frame)
         self._audio = QAudioOutput(self)
         self._audio.setMuted(True)
+        self._remote_audio = CameraAudioOutput(self)
+        self._remote_audio.failed.connect(self._audio_failed)
         self._player = QMediaPlayer(self)
         self._player.setVideoSink(self._sink)
         self._player.setAudioOutput(self._audio)
@@ -89,6 +94,8 @@ class CameraPlayback(QObject):
         self._relay.retry.connect(self._authorize)
         self._relay.received_bytes.connect(self._record_received)
         self._relay.quality_changed.connect(self.quality_changed)
+        self._relay.audio_frame.connect(self._on_audio)
+        self._relay.audio_failed.connect(self._audio_failed)
         self._authorize()
 
     def _authorize(self) -> None:
@@ -109,6 +116,7 @@ class CameraPlayback(QObject):
         self.status_changed.emit("正在载入摄像机画面…")
         self._player.setSource(url)
         self._player.play()
+        self._apply_mute()
 
     def _on_frame(self, frame) -> None:
         if self._stopped or self._url.isEmpty() or not frame.isValid():
@@ -157,7 +165,24 @@ class CameraPlayback(QObject):
         return True
 
     def set_muted(self, muted: bool) -> None:
-        self._audio.setMuted(muted)
+        self._muted = muted
+        self._apply_mute()
+
+    def _apply_mute(self) -> None:
+        self._audio.setMuted(self._muted or self.is_remote)
+        if self._muted:
+            self._remote_audio.stop()
+        if self._relay is not None and shiboken6.isValid(self._relay):
+            self._relay.set_audio(not self._muted)
+
+    def _on_audio(self, codec: str, rate: int, data: bytes) -> None:
+        if not self._stopped and not self._muted:
+            self._remote_audio.write(codec, rate, data)
+
+    def _audio_failed(self, message: str) -> None:
+        if not self._stopped and not self._muted:
+            self.set_muted(True)
+            self.audio_failed.emit(message)
 
     @property
     def quality(self) -> int | None:
@@ -202,6 +227,7 @@ class CameraPlayback(QObject):
         if self._stopped:
             return
         self._stopped = True
+        self._remote_audio.stop()
         self._recv_rate.clear()
         self._stop_player()
         if self._relay is not None and shiboken6.isValid(self._relay):
