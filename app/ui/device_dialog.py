@@ -73,6 +73,7 @@ class DeviceDetailDialog(OverlayDialog):
             self._camera_view = CameraView(device, service, jobs, self._panel)
             outer.addWidget(self._camera_view, stretch=3)
             self.finished.connect(self._camera_view.stop)
+            self._camera_view.expanded_changed.connect(self._show_expanded_camera)
 
         # 工作台
         self._workbench = WorkbenchPanel(service, jobs, self._panel)
@@ -137,6 +138,23 @@ class DeviceDetailDialog(OverlayDialog):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._place_overlay()
+        self._layout_panel()
+
+    def _show_expanded_camera(self, expanded: bool) -> None:
+        self._workbench.setVisible(not expanded)
+        self._layout_panel()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Escape and self._camera_view is not None and self._camera_view.expanded:
+            self._camera_view.collapse()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _layout_panel(self) -> None:
+        if self._camera_view is not None and self._camera_view.expanded:
+            self._panel.setGeometry(self.rect())
+            return
         # 居中面板：宽度 900，窗口过窄时自适应收缩
         pw = 900
         pw = min(pw, max(320, self.width() - 40))
