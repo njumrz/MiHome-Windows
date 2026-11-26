@@ -28,8 +28,7 @@ class CameraPipWindow(QWidget):
                          | Qt.WindowType.WindowStaysOnTopHint
                          | Qt.WindowType.Tool)
         self._stream_name = camera_stream.stream_name(playback.device.did, playback.lens)
-        self._playback = playback
-        playback.setParent(self)
+        self._playback: CameraPlayback | None = None
         self._failed = False
         self._image = QImage()
         self._status_text = "正在连接摄像机…"
@@ -43,11 +42,26 @@ class CameraPipWindow(QWidget):
         self.setMinimumSize(240, 135)
         self.setMouseTracking(True)
 
+        self._attach_playback(playback)
+        self._apply_size(_DEFAULT_WIDTH)
+        self._place_default()
+
+    def _attach_playback(self, playback: CameraPlayback) -> None:
+        self._playback = playback
+        playback.retain(self)
         playback.frame_changed.connect(self._on_frame)
         playback.status_changed.connect(self._show_status)
         playback.failed.connect(self._on_error)
-        self._apply_size(_DEFAULT_WIDTH)
-        self._place_default()
+
+    def _detach_playback(self) -> None:
+        playback = self._playback
+        if playback is None:
+            return
+        playback.frame_changed.disconnect(self._on_frame)
+        playback.status_changed.disconnect(self._show_status)
+        playback.failed.disconnect(self._on_error)
+        self._playback = None
+        playback.release(self)
 
     def _show_status(self, message: str) -> None:
         self._status_text = message
@@ -65,11 +79,22 @@ class CameraPipWindow(QWidget):
     def switch_remote_lens(self, stream_name: str, name: str, lens: int) -> bool:
         if not self._playback.switch_lens(lens):
             return False
+        self._move_to_stream(stream_name, name)
+        return True
+
+    def show_stream(self, stream_name: str, name: str, playback: CameraPlayback) -> None:
+        self._detach_playback()
+        self._attach_playback(playback)
+        self._failed = False
+        self._on_frame(QImage())
+        self._show_status("正在载入摄像机画面…")
+        self._move_to_stream(stream_name, name)
+
+    def _move_to_stream(self, stream_name: str, name: str) -> None:
         _OPEN.pop(self._stream_name, None)
         self._stream_name = stream_name
         _OPEN[stream_name] = self
         self.setWindowTitle(f"{name} - 实时画面")
-        return True
 
     # ---------- 绘制 ----------
 
@@ -132,7 +157,7 @@ class CameraPipWindow(QWidget):
         act_top.triggered.connect(self._toggle_on_top)
         menu.addAction(act_top)
 
-        if not self._playback.is_remote:
+        if not self._playback.is_remote and not self._playback.shared:
             act_mute = QAction("静音", menu)
             act_mute.setCheckable(True)
             act_mute.setChecked(self._muted)
@@ -174,7 +199,7 @@ class CameraPipWindow(QWidget):
     # ---------- 生命周期 ----------
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        self._playback.stop()
+        self._detach_playback()
         _OPEN.pop(self._stream_name, None)
         super().closeEvent(event)
 
@@ -192,21 +217,37 @@ def show_existing_pip(stream_name: str) -> CameraPipWindow | None:
     return win
 
 
+def existing_pip_playback(stream_name: str) -> CameraPlayback | None:
+    win = _OPEN.get(stream_name)
+    if (win is not None and shiboken6.isValid(win) and not win._failed
+            and win._playback is not None and win._playback.is_active):
+        return win._playback
+    return None
+
+
 def open_camera_pip(device: DeviceInfo, lens: int, name: str, service: MijiaService,
-                    jobs: JobExecutor, *, reuse_relay: bool = True) -> CameraPipWindow:
+                    jobs: JobExecutor, *, reuse_relay: bool = True,
+                    playback: CameraPlayback | None = None) -> CameraPipWindow:
     stream = camera_stream.stream_name(device.did, lens)
     win = show_existing_pip(stream)
     if win is not None:
         return win
+    if playback is not None and not playback.is_active:
+        playback = None
     if reuse_relay and camera_stream.has_second_lens(device.model):
         other = _OPEN.get(camera_stream.stream_name(device.did, 3 - lens))
-        if (other is not None and shiboken6.isValid(other)
-                and other.switch_remote_lens(stream, name, lens)):
-            return show_existing_pip(stream)
-    playback = CameraPlayback(device, lens, service, jobs)
+        if other is not None and shiboken6.isValid(other):
+            if playback is not None:
+                other.show_stream(stream, name, playback)
+                return show_existing_pip(stream)
+            if other.switch_remote_lens(stream, name, lens):
+                return show_existing_pip(stream)
+    if playback is None:
+        playback = CameraPlayback(device, lens, service, jobs)
     win = CameraPipWindow(playback, name)
     _OPEN[stream] = win
     win.show()
-    playback.start()
+    if not playback.is_active:
+        playback.start()
     win.raise_()
     return win

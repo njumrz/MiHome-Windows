@@ -40,7 +40,8 @@ class DeviceDetailDialog(OverlayDialog):
 
         header = QHBoxLayout()
         header.addStretch(1)
-        if camera_stream.is_camera(device.model):
+        is_camera = camera_stream.is_camera(device.model)
+        if is_camera:
             if camera_stream.has_second_lens(device.model):
                 self._lens = QComboBox()
                 self._lens.setAccessibleName("摄像机镜头")
@@ -56,7 +57,7 @@ class DeviceDetailDialog(OverlayDialog):
             self._pip_button.setToolTip("在置顶小窗中播放，并自动选择局域网或公网中继")
             self._pip_button.clicked.connect(lambda: self._start_camera(floating=True))
             if self._lens is not None:
-                self._pip_button.setToolTip("在悬浮窗播放所选镜头。公网播放时直接切换镜头，右键可另开窗口。")
+                self._pip_button.setToolTip("在悬浮窗播放所选镜头。右键可另开窗口。")
                 self._pip_button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
                 self._pip_button.customContextMenuRequested.connect(self._camera_pip_menu)
             header.addWidget(self._pip_button)
@@ -67,17 +68,16 @@ class DeviceDetailDialog(OverlayDialog):
         header.addWidget(self._make_close_button())
         outer.addLayout(header)
 
-        if camera_stream.is_camera(device.model):
+        self._workbench = WorkbenchPanel(service, jobs, self._panel)
+        outer.addWidget(self._workbench, stretch=1)
+
+        if is_camera:
             from app.ui.camera_view import CameraView
 
             self._camera_view = CameraView(device, service, jobs, self._panel)
-            outer.addWidget(self._camera_view, stretch=3)
+            self._workbench.mount_preview(self._camera_view)
             self.finished.connect(self._camera_view.stop)
             self._camera_view.expanded_changed.connect(self._show_expanded_camera)
-
-        # 工作台
-        self._workbench = WorkbenchPanel(service, jobs, self._panel)
-        outer.addWidget(self._workbench, stretch=1)
 
     @property
     def panel(self) -> WorkbenchPanel:
@@ -103,7 +103,14 @@ class DeviceDetailDialog(OverlayDialog):
         if floating:
             from app.ui.camera_pip import open_camera_pip
 
-            open_camera_pip(self.device, lens, name, self._service, self._jobs, reuse_relay=reuse_relay)
+            playback = None
+            if self._camera_view is not None:
+                tile = self._camera_view.tiles[lens - 1]
+                if tile.playback is not None and not tile.playback.is_active:
+                    tile.start()
+                playback = tile.playback
+            open_camera_pip(self.device, lens, name, self._service, self._jobs,
+                            reuse_relay=reuse_relay, playback=playback)
             return
         button = self._web_button
         if button is None or not button.isEnabled():
@@ -141,7 +148,13 @@ class DeviceDetailDialog(OverlayDialog):
         self._layout_panel()
 
     def _show_expanded_camera(self, expanded: bool) -> None:
-        self._workbench.setVisible(not expanded)
+        if expanded:
+            self._workbench.hide()
+            self._panel.layout().addWidget(self._camera_view, stretch=1)
+            self._camera_view.show()
+        else:
+            self._workbench.mount_preview(self._camera_view)
+            self._workbench.show()
         self._layout_panel()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802

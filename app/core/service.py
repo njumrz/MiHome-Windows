@@ -21,6 +21,7 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import mijiaAPI as _mijia_api_pkg
@@ -131,6 +132,7 @@ class MijiaService:
         # 认证文件沿用上游默认位置 ~/.config/mijia-api/auth.json，
         # 这样 CLI 里扫过的码在 GUI 直接生效，反之亦然
         self._api = self._init_api()
+        self._camera_routes: dict[str, tuple[str, float]] = {}
         self._device_cache: dict[str, mijiaDevice] = {}
         # did -> (model, spec_type, name) 索引，批量读状态与共享设备组装时
         # 避免反复拉设备列表；自有与共享设备都在其中
@@ -209,8 +211,16 @@ class MijiaService:
         """长轮询等待用户扫码，阻塞可达两分钟，必须放在后台线程调用。"""
         try:
             self._api._complete_qr_login(login_data)
+            self._camera_routes.clear()
         except Exception as exc:
             raise _wrap_error(exc, "扫码登录未完成") from exc
+
+    def camera_route_hint(self, did: str) -> str | None:
+        hint = self._camera_routes.get(did)
+        return hint[0] if hint is not None and monotonic() - hint[1] < 900 else None
+
+    def remember_camera_route(self, did: str, route: str) -> None:
+        self._camera_routes[did] = (route, monotonic())
 
     @_serialized
     def authorize_camera_relay(self, did: str) -> CameraRelayAuthorization:
