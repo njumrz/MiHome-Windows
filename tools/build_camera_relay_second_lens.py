@@ -82,10 +82,9 @@ def build(jdk: Path, source: Path, relay_dir: Path) -> Path:
     }
 
     private static void switchStream(String[] fields) throws Exception {
-        server.close();
-        pauseVideo();
-        if (stopped.get()) return;
         boolean changeQuality = fields[0].equals("QUALITY");
+        if (!changeQuality) pauseVideo();
+        if (stopped.get()) return;
         int previousQuality = quality;
         int value = Integer.parseInt(fields[1]);
         if (changeQuality) quality = value;
@@ -97,12 +96,13 @@ def build(jdk: Path, source: Path, relay_dir: Path) -> Path:
             if (changeQuality) report("QUALITY ACCEPTED");
         } catch (RuntimeException error) {
             if (!changeQuality || stopped.get()) throw error;
-            pauseVideo();
             quality = previousQuality;
             startLens();
             first = nextKeyframe();
             report("QUALITY REJECTED");
         }
+        if (stopped.get()) return;
+        server.close();
         server = new HttpStreamServer(Integer.parseInt(fields[2]), fields[3], null);
         server.start();
         server.publish(first);
